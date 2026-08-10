@@ -1,0 +1,18 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+        exclude: ^charts/
+      - id: check-added-large-files
+      - id: check-merge-conflict
+
+  # ruff and mypy are run via `pixi run lint`/`pixi run typecheck` in CI (see
+  # ci.yaml), which pin versions in pixi.toml — that's the single source of
+  # truth for those two tools, so they are intentionally not duplicated here.
+
+  # helm ships no .pre-commit-hooks.yaml, so it cannot be used as a
+  # pre-commit hook; chart linting is handled by the CI helm-lint job instead.
