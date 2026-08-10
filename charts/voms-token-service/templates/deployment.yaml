@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "voms-token-service.fullname" . }}
+  labels:
+    {{- include "voms-token-service.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "voms-token-service.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "voms-token-service.selectorLabels" . | nindent 8 }}
+    spec:
+      # This pod never talks to the Kubernetes API; withholding the
+      # ServiceAccount token removes an entire credential class from a pod
+      # that already holds the homes PVC mount.
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # See values.yaml: reading arbitrary users' ~/.globus/*.pem requires
+      # runAsUser 0 plus CAP_DAC_READ_SEARCH (container-level, below);
+      # everything else stays locked down (read-only rootfs, drop ALL bar
+      # that one capability, no privilege escalation, RuntimeDefault
+      # seccomp).
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: voms-token-service
+          image: {{ include "voms-token-service.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # Names must match Settings fields (config.py).
+            - name: BROKER_JWKS_URL
+              value: {{ .Values.config.brokerJwksUrl | quote }}
+            - name: BROKER_ISSUER
+              value: {{ .Values.config.brokerIssuer | quote }}
+            - name: EXPECTED_AUDIENCE
+              value: {{ .Values.config.expectedAudience | quote }}
+            - name: HOME_ROOT
+              value: {{ .Values.config.homeRoot | quote }}
+            - name: VOMS_PROXY_INIT_BIN
+              value: {{ .Values.config.vomsProxyInitBin | quote }}
+            - name: DEFAULT_VOMS
+              value: {{ .Values.config.defaultVoms | quote }}
+            - name: DEFAULT_VALID
+              value: {{ .Values.config.defaultValid | quote }}
+            - name: PROXY_INIT_TIMEOUT_SECONDS
+              value: {{ .Values.config.proxyInitTimeoutSeconds | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+            # Extra env vars from values (name: value pairs)
+            {{- range $key, $val := .Values.env }}
+            - name: {{ $key | quote }}
+              value: {{ $val | quote }}
+            {{- end }}
+          volumeMounts:
+            # The homes PVC — mounted read-only at config.homeRoot. This pod
+            # never writes to it; the minted proxy is returned in the
+            # response body only.
+            - name: homes
+              mountPath: {{ .Values.homes.mountPath }}
+              readOnly: true
+            # readOnlyRootFilesystem requires an explicit writable /tmp for
+            # voms-proxy-init's private per-request tmpdir (minting.py).
+            # tmpfs-backed (Memory) so the proxy's private key material
+            # never touches disk, even transiently.
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            # readyz verifies voms-proxy-init is executable and the broker
+            # JWKS is fetchable.
+            httpGet:
+              path: /readyz
+              port: http
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: homes
+          persistentVolumeClaim:
+            claimName: {{ .Values.homes.existingClaim }}
+            readOnly: true
+        - name: tmp
+          emptyDir:
+            medium: Memory

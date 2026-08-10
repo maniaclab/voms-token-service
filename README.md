@@ -1,0 +1,228 @@
+# voms-token-service
+
+VOMS proxy minting for the UChicago ATLAS Analysis Facility MCP platform. A
+deliberately tiny, auditable service: one minting endpoint, verified against
+one credential type, shelling out to one binary.
+
+## Why this service exists
+
+Minting a VOMS proxy for a user requires reading their
+`~/.globus/{usercert,userkey}.pem` and the passphrase that unlocks the
+private key. Both are trust-domain-defining: the passphrase must never reach
+the [af-mcp-broker](https://github.com/maniaclab/af-mcp-platform) (a
+different trust domain holding many other credentials), and the NFS-backed
+homes filesystem must not be mounted anywhere near it either.
+
+This service is the **only** component in the platform that mounts user home
+directories. It receives a user's identity (asserted by the broker, which
+already resolved it from the directory) plus their Globus passphrase over
+HTTPS, runs `voms-proxy-init` against that user's own certificate pair, and
+returns the proxy PEM in the response body. Nothing is written to shared
+storage; the passphrase lives only in memory and is zeroed immediately after
+use.
+
+```
+ LLM client                af-mcp-platform                 voms-token-service
+     |                          |                                |
+     |  MCP tool call           |                                |
+     +------------------------->|                                |
+     |                 [broker authenticates &                   |
+     |                  authorizes the user, resolves             |
+     |                  their POSIX identity]                     |
+     |                          |  POST /v1/mint                 |
+     |                          |  Bearer: AF Broker              |
+     |                          |  Identity Token (RS256)         |
+     |                          |  {unixname, uid, gid,           |
+     |                          |   passphrase, voms, valid}      |
+     |                          +------------------------------->|
+     |                          |                        voms-token-service
+     |                          |                                |
+     |                          |                    verify JWT (broker JWKS)
+     |                          |                    read ~<unixname>/.globus/*
+     |                          |                                |
+     |                          |                    voms-proxy-init --rfc
+     |                          |                      --voms <voms>
+     |                          |                      --valid <valid>
+     |                          |                      --cert <usercert>
+     |                          |                      --key <userkey>
+     |                          |                      --out <tmpfile>
+     |                          |                      --pwstdin
+     |                          |                                |
+     |                          |                    [passphrase zeroed from
+     |                          |                     memory immediately;
+     |                          |                     tmpdir removed after]
+     |                          |<-------------------------------+
+     |                          |  {pem, dn, voms_attributes,   |
+     |                          |   expires_at}                  |
+```
+
+## The credential it verifies
+
+This is a consumer of the **AF Broker Identity Token** internal protocol
+([maniaclab/af-mcp-platform#162](https://github.com/maniaclab/af-mcp-platform/issues/162)),
+the same protocol [condor-token-service](https://github.com/maniaclab/condor-token-service)
+consumes: a short-lived RS256 JWT minted by the broker with claims
+`iss`/`sub`/`aud`/`exp`/`iat`/`jti`. These are **identity assertions, not
+capability claims** — the broker has already authorized the call before
+minting the token, and this service derives no authorization from token
+claims. A missing or invalid token is refused (401).
+
+**Unlike condor-token-service**, the `unixname`/`uid`/`gid` to mint a proxy
+for come from the **request body**, not the token: the broker resolves a
+caller's POSIX identity from the directory per-request and asserts it
+directly, so there is nothing gained by round-tripping it through the token
+as well. The token's only job here is proving the call genuinely came from
+the broker.
+
+Verification fetches the broker's JWKS from `BROKER_JWKS_URL` (TTL-cached,
+single-flight refresh, stale-served on fetch failure), then enforces
+signature, issuer, audience, and expiry — the same JWKS caching discipline as
+condor-token-service's `identity.py`. Every request produces exactly one JSON
+audit line — subject, unixname, `sha256(dn)`, broker-token `jti`, outcome
+(`issued|denied|error`), request id — and neither the passphrase nor the
+minted proxy PEM is ever logged (`logging.py`'s
+`SensitiveValueRedactProcessor` is the defense-in-depth backstop if a future
+code path gets this wrong).
+
+## API
+
+| Endpoint | Auth | Behavior |
+| --- | --- | --- |
+| `POST /v1/mint` | `Authorization: Bearer <AF Broker Identity Token>` | Body `{"unixname": str, "uid": int, "gid": int, "passphrase": str, "voms": "atlas", "valid": "192:00"}` (`voms`/`valid` optional). Mints a VOMS proxy via `voms-proxy-init` against `{HOME_ROOT}/{unixname}/.globus/{usercert,userkey}.pem`. Returns `{"pem", "dn", "voms_attributes", "expires_at"}`. 400 `{"detail": "bad passphrase"}` when the key's passphrase was wrong (detected from voms-proxy-init's openssl "bad decrypt" stderr); 401 invalid/missing token; 502 on any other minting failure (generic detail — stderr is logged server-side only, never returned). |
+| `GET /healthz` | none | Always 200. |
+| `GET /readyz` | none | 200 only when `voms-proxy-init` is executable and the broker JWKS is fetchable; 503 otherwise. |
+
+Configuration is env-driven (`src/voms_token_service/config.py`):
+`BROKER_JWKS_URL`, `BROKER_ISSUER`, `EXPECTED_AUDIENCE`, `HOME_ROOT`,
+`VOMS_PROXY_INIT_BIN`, `DEFAULT_VOMS`, `DEFAULT_VALID`,
+`PROXY_INIT_TIMEOUT_SECONDS`, `JWKS_CACHE_TTL_SECONDS`, `LOG_LEVEL`.
+
+**No rate limiter here, unlike condor-token-service.** condor-token-service
+guards a symmetric pool-password key that could mint tokens for any identity
+in the pool, so it needs its own throttle. This service instead runs the
+*user's own* passphrase against the *user's own* certificate; the broker's
+`CredentialCache` (`af-mcp-platform`'s `credentials/x509.py`) already
+rate-limits unlock attempts per uid (`check_unlock_rate_limit`,
+`record_failed_unlock`) before ever calling here. Adding a second limiter in
+this service would duplicate that policy in the wrong trust domain rather
+than strengthen it.
+
+## The exact voms-proxy-init invocation
+
+```
+voms-proxy-init --rfc --voms <voms> --valid <valid> \
+    --cert <home_root>/<unixname>/.globus/usercert.pem \
+    --key  <home_root>/<unixname>/.globus/userkey.pem \
+    --out  <private-tmpdir>/proxy.pem \
+    --pwstdin
+```
+
+The passphrase is written to stdin (never argv, never logged) as a
+`bytearray`, and that buffer — plus the stdin copy built at the subprocess
+I/O boundary — is zeroed (`_zero_bytearray` in `minting.py`, the same
+discipline as `af-mcp-platform`'s `credentials/x509.py`) immediately after
+the subprocess returns, on every path: success, bad passphrase, or timeout.
+The private tmpdir holding the output proxy is removed once its contents
+have been read back into memory. The subprocess call itself is a
+synchronous `subprocess.run(timeout=...)` offloaded to a thread via
+`run_in_executor` — mirroring `x509.py`'s own local-dev minting path —
+rather than `asyncio.create_subprocess_exec`, which has a
+cancellation/timeout hang on at least one platform when the target binary
+is a PATH-resolved shebang script (encountered while writing this service's
+own test suite; a real `voms-proxy-init` is a compiled binary with no
+shebang layer, but the synchronous path sidesteps the question entirely).
+
+DN, VOMS attributes, and the expiry are parsed directly from the resulting
+proxy PEM with the `cryptography` library — **not** by shelling out to a
+second binary (`voms-proxy-info`). This service's entire design point is
+shelling out to exactly one binary; parsing the certificate this service
+just wrote, with a library already in the dependency graph, gets the same
+information without a second trust boundary.
+
+## Deployment
+
+The Helm chart at `charts/voms-token-service/` encodes the privilege model:
+
+- **Homes PVC, read-only.** The chart mounts an existing PVC
+  (`homes.existingClaim`, typically ReadOnlyMany NFS-backed) at
+  `config.homeRoot` (`/home` by default) — the *only* storage this pod
+  touches, and only for reading. Unlike condor-token-service (pinned to
+  specific nodes holding a hostPath secret), this service has no node
+  affinity requirement by default: any node that can mount the PVC can run
+  it.
+- **Privilege model: `runAsUser: 0` + `CAP_DAC_READ_SEARCH`, not plain
+  root.** `~<user>/.globus/{usercert,userkey}.pem` are typically mode 0600,
+  owned by that user — not root, and not group-readable by anything this
+  pod could plausibly hold. Running as `runAsUser: 0` with `capabilities:
+  {drop: [ALL]}` (condor-token-service's own approach, for the pool
+  password it owns as root) would **not** be enough here: dropping every
+  capability strips `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH` too, and
+  without one of those, uid 0 does not bypass file permission checks. The
+  chart retains exactly `CAP_DAC_READ_SEARCH` (read-only bypass; not the
+  broader read+write+execute `CAP_DAC_OVERRIDE`) alongside `runAsUser: 0` —
+  the minimum privilege that can read arbitrary users' files it doesn't
+  own. Everything else stays locked down: read-only root filesystem
+  (voms-proxy-init's private tmpdir is a `Memory`-backed `emptyDir` at
+  `/tmp`, so proxy key material never touches disk even transiently), no
+  privilege escalation, `RuntimeDefault` seccomp, no ServiceAccount token.
+- **NetworkPolicy** — ingress only from the broker pods; egress limited to
+  DNS, the broker JWKS origin, and the VOMS server(s) `voms-proxy-init`
+  contacts (an `ipBlock` rule, since VOMS servers are external to the
+  cluster and DNS names can't appear directly in a `NetworkPolicy`; restrict
+  `networkPolicy.voms.cidr` to your VO's real server IPs in production).
+- **No ConfigMap** — all configuration is env-from-values, same as
+  condor-token-service.
+
+```bash
+helm lint charts/voms-token-service
+helm template voms-token-service charts/voms-token-service
+```
+
+The `Containerfile` builds the runtime image: debian-slim plus the
+pixi-built Python environment. `voms-proxy-init`/`-info`/`-destroy` come from
+conda-forge's `voms` package (`pixi.toml`'s `service` feature) — unlike
+condor-token-service's `condor_token_create` (which needs HTCondor's own apt
+repo), the VOMS clients ride in the *same* pixi environment as the Python
+service, so the Containerfile needs no extra package-manager step beyond
+`ca-certificates` (for verifying the broker's JWKS TLS endpoint and the VOMS
+server's TLS). CA trust bundle content, `vomses` VOMS-server directory
+files, and any IGTF trust-anchor package are a deployment-time concern —
+document your site's mechanism for getting those onto the running container
+(a ConfigMap/Secret volume, or a sidecar/init step) rather than baking a
+particular VO's trust config into the image.
+
+## Local development
+
+Everything runs through [pixi](https://pixi.sh); dependencies live in
+`pixi.toml` (this package's `pyproject.toml` intentionally declares no
+dependencies).
+
+```bash
+pixi run serve        # dev server with reload → http://localhost:8080/docs
+pixi run test         # pytest tests/ -v
+pixi run lint         # ruff check + format --check
+pixi run fmt          # ruff format + autofix
+pixi run typecheck    # mypy --strict src
+pixi run -e dev lint-all   # everything the CI lint job runs (ruff + mypy + pre-commit)
+```
+
+The default test suite never touches the network, a real VOMS server, or a
+real filesystem beyond pytest's own `tmp_path`: the JWKS is served by an
+in-process stub around a real generated RSA keypair
+(`tests/conftest.py::stub_jwks_fetch`), and `voms-proxy-init` is a fake
+executable shell script on `PATH` that writes a real, `cryptography`-signed
+self-signed certificate as its output (so `minting.py`'s parsing exercises
+real ASN.1, not a hand-rolled fake). `tests/test_e2e.py` is skipped unless
+`VOMS_E2E=1`, and requires a real deployment, a real broker-minted token, and
+a real Globus passphrase for a real AF user — it is never faked:
+
+```bash
+VOMS_E2E=1 \
+  VOMS_TOKEN_SERVICE_URL=https://voms-token.af.uchicago.edu \
+  AF_BROKER_IDENTITY_TOKEN=<freshly-minted broker token> \
+  VOMS_E2E_UNIXNAME=<real unixname> \
+  VOMS_E2E_UID=<real uid> \
+  VOMS_E2E_GID=<real gid> \
+  VOMS_E2E_PASSPHRASE=<real Globus key passphrase> \
+  pixi run test
+```

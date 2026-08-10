@@ -1,0 +1,139 @@
+# Default values for voms-token-service.
+#
+# This service exists because it is the ONLY component in the af-mcp-platform
+# that mounts user home directories (read-only, via NFS-backed PVC) — the
+# broker never receives the Globus passphrase or a filesystem view of
+# ~/.globus. Unlike condor-token-service (pinned to specific login nodes that
+# hold the HTCondor pool password on local disk), this service's only
+# placement constraint is the homes PVC below, which is typically
+# ReadOnlyMany and mountable from any node — so no nodeSelector/affinity is
+# required by default.
+
+# Two replicas for HA. Unlike condor-token-service, there is no in-memory
+# per-replica state to fragment across them (no rate limiter here — the
+# broker's own CredentialCache already rate-limits passphrase/unlock
+# attempts per uid before ever calling this service; see the README).
+replicaCount: 2
+
+image:
+  registry: ghcr.io
+  repository: maniaclab/voms-token-service
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Pull secret(s) for the registry above (ghcr packages default to private),
+# e.g. [{name: ghcr-pull-secret}] with the SealedSecret deployed alongside.
+imagePullSecrets: []
+
+# Not required by default (see the top-of-file note) — set only if your
+# homes PVC's storage backend requires pinning to specific nodes.
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# Environment for the service (see src/voms_token_service/config.py for the
+# full documentation of each setting).
+config:
+  # Where the broker publishes the JWKS for its AF Broker Identity Token
+  # signing keys (maniaclab/af-mcp-platform#162). Must agree with the
+  # networkPolicy.jwks egress rule below: the default fetches IN-CLUSTER,
+  # matching the default egress selectors. This is a fetch location only;
+  # iss validation is brokerIssuer below.
+  brokerJwksUrl: "http://af-mcp-platform-broker.mcp.svc.cluster.local:8080/.well-known/jwks.json"
+  # Required `iss` claim on inbound identity tokens.
+  brokerIssuer: "https://mcp.af.uchicago.edu"
+  # Required `aud` claim — this service's identity in the protocol.
+  expectedAudience: "voms-token-service"
+  # Root of the homes PVC mount below — user certs are expected at
+  # {homeRoot}/{unixname}/.globus/{usercert,userkey}.pem.
+  homeRoot: "/home"
+  # Path to (or PATH-resolved name of) the voms-proxy-init binary in the
+  # container image.
+  vomsProxyInitBin: "voms-proxy-init"
+  # Defaults applied when a mint request omits voms/valid.
+  defaultVoms: "atlas"
+  defaultValid: "192:00"
+  # Wall-clock bound on the voms-proxy-init subprocess (seconds).
+  proxyInitTimeoutSeconds: 60
+  logLevel: "INFO"
+
+# Extra environment variables (name: value) appended verbatim.
+env: {}
+
+homes:
+  # The NFS-backed PersistentVolumeClaim holding every AF user's home
+  # directory, mounted READ-ONLY at config.homeRoot. This is the only
+  # storage this pod touches — it never writes to it, and the minted proxy
+  # is returned in the response body, never persisted here or anywhere
+  # else shared. Typically ReadOnlyMany so it can be mounted from any node.
+  existingClaim: "af-homes"
+  mountPath: "/home"
+
+# Pod-level security context. Reading arbitrary users' ~/.globus/*.pem
+# (mode 0600, owned by that user — not root, and not group-readable by any
+# group this pod could plausibly hold) requires runAsUser 0 *and*
+# CAP_DAC_READ_SEARCH (see containerSecurityContext below) — root alone does
+# not bypass file permission checks once ALL capabilities are dropped.
+# CAP_DAC_READ_SEARCH is the minimal capability for this: it grants read
+# access, not CAP_DAC_OVERRIDE's read+write+execute. Everything else stays
+# locked down: the root filesystem is read-only (voms-proxy-init writes only
+# to the tmpfs /tmp emptyDir below), privilege escalation is disabled,
+# seccomp is RuntimeDefault, and no ServiceAccount token is mounted.
+podSecurityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+    add: [DAC_READ_SEARCH]
+
+service:
+  # ClusterIP only — the sole intended client is the in-cluster broker.
+  port: 8080
+
+networkPolicy:
+  enabled: true
+  # Ingress: ONLY the broker pods may reach the minting endpoint. Defaults
+  # match the production af-mcp-platform deployment: namespace `mcp`, broker
+  # pods labeled name=af-mcp-platform + component=broker.
+  broker:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: mcp
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: af-mcp-platform
+        app.kubernetes.io/component: broker
+  # Egress: besides DNS, ONLY the origin serving config.brokerJwksUrl.
+  # Defaults assume the JWKS is served by the same in-cluster broker pods;
+  # if the JWKS is only reachable via an external ingress, replace the
+  # selectors with an ipBlock-based rule for that origin.
+  jwks:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: mcp
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: af-mcp-platform
+        app.kubernetes.io/component: broker
+    port: 8080
+  # Egress: the VOMS server(s) voms-proxy-init actually contacts (e.g.
+  # voms2.cern.ch:15001 for atlas). These are external to the cluster and
+  # their IPs are not broker/namespace-selectable, so this is an ipBlock
+  # rule — 0.0.0.0/0 by default (restrict this to your VO's real VOMS
+  # server IPs/CIDRs; DNS names can't be used directly in a NetworkPolicy).
+  voms:
+    cidr: "0.0.0.0/0"
+    port: 15001
+
+# e.g. {limits: {memory: 256Mi}, requests: {cpu: 50m, memory: 128Mi}}
+resources: {}
+
+nameOverride: ""
+fullnameOverride: ""
