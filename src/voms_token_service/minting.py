@@ -8,15 +8,15 @@ minted proxy is written to a per-user pod-tmpfs dir ({proxy_tmp_root}/
 {unixname}) that the impersonated child CREATES ITSELF under umask 077 — so
 it is owned by the real uid, mode 0700, scoped to that user, and needs no
 chown/CAP_CHOWN. The read-back+cleanup is a second impersonated subprocess
-(cat && rm -rf), so root never touches user-owned files or dirs at all, and
-the homes mount stays read-only.
+(cat && rm -f of the exact file — nothing recursive exists in this service),
+so root never touches user-owned files or dirs at all, and the homes mount
+stays read-only.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -177,17 +177,20 @@ async def mint_proxy(
     child_env = {**os.environ, "HOME": str(home)}
 
     # The per-user working dir is created BY the impersonated child under
-    # umask 077 (owned real uid, mode 0700 — no chown, no CAP_CHOWN). The
-    # preceding rm -rf defends against another uid having pre-created the
-    # path in the shared 0777 tmpfs (deleting entries there needs only
-    # write on the parent, which every uid has). "$1" positional args keep
-    # unixname-derived paths out of shell interpolation.
+    # umask 077 (owned real uid, mode 0700 — no chown, no CAP_CHOWN).
+    # mkdir -p is idempotent for the same user's next mint; in the
+    # (unreachable within this pod's threat model) case of a wrong-owner
+    # dir already existing, the proxy write simply fails closed. There is
+    # deliberately NO recursive deletion anywhere in this service: an
+    # rm -rf on a config-derived path is a wipe waiting for a
+    # misconfiguration. "$1" positional args keep unixname-derived paths
+    # out of shell interpolation.
     if run_user is not None:
         prep = await _run_as_user(
             [
                 "bash",
                 "-c",
-                'umask 077; rm -rf "$1" && mkdir -p "$1"',
+                'umask 077; mkdir -p "$1"',
                 "bash",
                 str(out_dir),
             ],
@@ -205,8 +208,7 @@ async def mint_proxy(
             )
             raise MintingError("failed to prepare the proxy working directory")
     else:
-        shutil.rmtree(out_dir, ignore_errors=True)
-        out_dir.mkdir(mode=0o700, parents=True)
+        out_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     argv = [
         settings.voms_proxy_init_bin,
         "--rfc",
@@ -353,12 +355,14 @@ async def _read_proxy_as_user(
     to user-owned files. Raises MintingError if missing or empty.
     """
     if run_user is not None:
-        # rm prints nothing, so stdout is purely the PEM.
+        # rm -f of the exact file only (never recursive, never a derived
+        # directory); rm prints nothing, so stdout is purely the PEM. The
+        # empty 0700 per-user dir persists on pod tmpfs and is reused.
         result = await _run_as_user(
             [
                 "bash",
                 "-c",
-                'cat "$1" && rm -rf "$(dirname "$1")"',
+                'cat "$1" && rm -f -- "$1"',
                 "bash",
                 str(out_path),
             ],
@@ -381,7 +385,7 @@ async def _read_proxy_as_user(
             logger.exception("voms_proxy_init_no_output", unixname=unixname)
             raise MintingError("voms-proxy-init produced no proxy file") from exc
         finally:
-            shutil.rmtree(out_path.parent, ignore_errors=True)
+            out_path.unlink(missing_ok=True)
     if not proxy_pem:
         logger.error("voms_proxy_init_empty_output", unixname=unixname)
         raise MintingError("voms-proxy-init produced an empty proxy file")
