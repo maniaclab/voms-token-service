@@ -124,13 +124,14 @@ networkPolicy:
         app.kubernetes.io/component: broker
     port: 8080
   # Egress: the VOMS server(s) voms-proxy-init actually contacts (e.g.
-  # voms2.cern.ch:15001 for atlas). These are external to the cluster and
+  # voms-atlas-auth.cern.ch:443 for atlas — the endpoint named in the
+  # image's baked-in vomses file). These are external to the cluster and
   # their IPs are not broker/namespace-selectable, so this is an ipBlock
   # rule — 0.0.0.0/0 by default (restrict this to your VO's real VOMS
   # server IPs/CIDRs; DNS names can't be used directly in a NetworkPolicy).
   voms:
     cidr: "0.0.0.0/0"
-    port: 15001
+    port: 443
 
 # e.g. {limits: {memory: 256Mi}, requests: {cpu: 50m, memory: 128Mi}}
 resources: {}
