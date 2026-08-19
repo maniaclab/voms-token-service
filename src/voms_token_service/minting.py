@@ -4,8 +4,12 @@ The user's Globus private-key passphrase is the only secret this service
 receives that it does not itself own. It is transmitted to voms-proxy-init
 over the subprocess's stdin (``--pwstdin``) — never on argv, never logged —
 and the buffer holding it is zeroed in place immediately after use. The
-minted proxy is written to a private per-request tmpdir that is always
-removed once its contents have been read back into memory.
+minted proxy is written to a per-user pod-tmpfs dir ({proxy_tmp_root}/
+{unixname}) that the impersonated child CREATES ITSELF under umask 077 — so
+it is owned by the real uid, mode 0700, scoped to that user, and needs no
+chown/CAP_CHOWN. The read-back+cleanup is a second impersonated subprocess
+(cat && rm -rf), so root never touches user-owned files or dirs at all, and
+the homes mount stays read-only.
 """
 
 from __future__ import annotations
@@ -14,7 +18,6 @@ import asyncio
 import os
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,7 +25,13 @@ from typing import TYPE_CHECKING
 import structlog
 from cryptography import x509
 
-from voms_token_service.paths import usercert_path, userkey_path
+from voms_token_service.paths import (
+    proxy_out_dir,
+    proxy_out_path,
+    user_home,
+    usercert_path,
+    userkey_path,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -133,7 +142,8 @@ async def mint_proxy(
         voms-proxy-init --rfc --voms <voms> --valid <valid> \\
             --cert <usercert> --key <userkey> --out <tmpfile> --pwstdin
 
-    in a private tmpdir, feeding *passphrase* on stdin. Takes ownership of
+    writing the proxy to $HOME/x509_u$UID in the user's own home, feeding
+    *passphrase* on stdin. Takes ownership of
     *passphrase* and zeros it (and the stdin buffer built from it) before
     returning, on every path — success, bad passphrase, or infra failure.
 
@@ -147,22 +157,56 @@ async def mint_proxy(
     usercert = usercert_path(settings, unixname)
     userkey = userkey_path(settings, unixname)
 
-    tmpdir = Path(tempfile.mkdtemp(prefix="voms-proxy-"))
-    out_path = tmpdir / "proxy.pem"
+    home = user_home(settings, unixname)
+    out_dir = proxy_out_dir(settings, unixname)
+    out_path = proxy_out_path(settings, unixname, uid)
 
     # voms-proxy-init requires the key file be OWNED by the process's
     # effective uid (grid sslutils checks ownership, not just mode), so when
     # running as root — the production pod — the child runs AS the
-    # requesting user (CAP_SETUID/CAP_SETGID in the chart). This also makes
-    # the NFS homes access happen as the real uid. The tmpdir must then be
-    # writable by that user. Outside the pod (tests, local dev as non-root)
-    # no impersonation is possible or needed.
+    # requesting user (CAP_SETUID/CAP_SETGID in the chart); the homes key
+    # read then carries the real uid (correct NFS semantics, mount stays
+    # read-only). HOME points at the user's home so the binary's incidental
+    # dotfile lookups don't hit root's. Outside the pod (tests, local dev as
+    # non-root) no impersonation is possible or needed.
     run_user: int | None = None
     run_group: int | None = None
     run_extra_groups: list[int] | None = None
     if os.geteuid() == 0:
-        os.chown(tmpdir, uid, gid)
         run_user, run_group, run_extra_groups = uid, gid, []
+    child_env = {**os.environ, "HOME": str(home)}
+
+    # The per-user working dir is created BY the impersonated child under
+    # umask 077 (owned real uid, mode 0700 — no chown, no CAP_CHOWN). The
+    # preceding rm -rf defends against another uid having pre-created the
+    # path in the shared 0777 tmpfs (deleting entries there needs only
+    # write on the parent, which every uid has). "$1" positional args keep
+    # unixname-derived paths out of shell interpolation.
+    if run_user is not None:
+        prep = await _run_as_user(
+            [
+                "bash",
+                "-c",
+                'umask 077; rm -rf "$1" && mkdir -p "$1"',
+                "bash",
+                str(out_dir),
+            ],
+            run_user=run_user,
+            run_group=run_group,
+            run_extra_groups=run_extra_groups,
+            env=child_env,
+        )
+        if prep.returncode != 0:
+            logger.error(
+                "voms_proxy_workdir_failed",
+                unixname=unixname,
+                uid=uid,
+                stderr=prep.stderr.decode(errors="replace").strip(),
+            )
+            raise MintingError("failed to prepare the proxy working directory")
+    else:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        out_dir.mkdir(mode=0o700, parents=True)
     argv = [
         settings.voms_proxy_init_bin,
         "--rfc",
@@ -198,6 +242,7 @@ async def mint_proxy(
                     user=run_user,
                     group=run_group,
                     extra_groups=run_extra_groups,
+                    env=child_env,
                 ),
             )
         except OSError as exc:
@@ -244,9 +289,18 @@ async def mint_proxy(
             )
             raise MintingError(f"voms-proxy-init exited {result.returncode}")
 
-        proxy_pem = _read_proxy_file(out_path, unixname)
+        proxy_pem = await _read_proxy_as_user(
+            out_path,
+            unixname,
+            run_user=run_user,
+            run_group=run_group,
+            run_extra_groups=run_extra_groups,
+        )
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        # The proxy file deliberately persists in the user's home (their
+        # own 0600 session proxy, per the login-node convention); there is
+        # no pod-side temp state to clean up.
+        pass
 
     dn, voms_attributes, expires_at = _parse_proxy_pem(proxy_pem)
     return MintedProxy(
@@ -257,13 +311,77 @@ async def mint_proxy(
     )
 
 
-def _read_proxy_file(out_path: Path, unixname: str) -> bytes:
-    """Read the minted proxy PEM, raising MintingError if it is missing or empty."""
-    try:
-        proxy_pem = out_path.read_bytes()
-    except OSError as exc:
-        logger.exception("voms_proxy_init_no_output", unixname=unixname)
-        raise MintingError("voms-proxy-init produced no proxy file") from exc
+async def _run_as_user(
+    argv: list[str],
+    *,
+    run_user: int | None,
+    run_group: int | None,
+    run_extra_groups: list[int] | None,
+    env: dict[str, str] | None = None,
+    timeout: float = 30,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run a short impersonated helper subprocess off the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(
+            argv,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+            user=run_user,
+            group=run_group,
+            extra_groups=run_extra_groups,
+            env=env,
+        ),
+    )
+
+
+async def _read_proxy_as_user(
+    out_path: Path,
+    unixname: str,
+    *,
+    run_user: int | None,
+    run_group: int | None,
+    run_extra_groups: list[int] | None,
+) -> bytes:
+    """Read the minted proxy PEM back, as the user when impersonating.
+
+    The file is 0600, owned by the user, in the 0700 per-user tmpfs dir the
+    impersonated child created — so the read (and the cleanup of that dir)
+    also runs as the user: root never needs read or directory-write access
+    to user-owned files. Raises MintingError if missing or empty.
+    """
+    if run_user is not None:
+        # rm prints nothing, so stdout is purely the PEM.
+        result = await _run_as_user(
+            [
+                "bash",
+                "-c",
+                'cat "$1" && rm -rf "$(dirname "$1")"',
+                "bash",
+                str(out_path),
+            ],
+            run_user=run_user,
+            run_group=run_group,
+            run_extra_groups=run_extra_groups,
+        )
+        if result.returncode != 0:
+            logger.error(
+                "voms_proxy_init_no_output",
+                unixname=unixname,
+                stderr=result.stderr.decode(errors="replace").strip(),
+            )
+            raise MintingError("voms-proxy-init produced no proxy file")
+        proxy_pem = result.stdout
+    else:
+        try:
+            proxy_pem = out_path.read_bytes()
+        except OSError as exc:
+            logger.exception("voms_proxy_init_no_output", unixname=unixname)
+            raise MintingError("voms-proxy-init produced no proxy file") from exc
+        finally:
+            shutil.rmtree(out_path.parent, ignore_errors=True)
     if not proxy_pem:
         logger.error("voms_proxy_init_empty_output", unixname=unixname)
         raise MintingError("voms-proxy-init produced an empty proxy file")

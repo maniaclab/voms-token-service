@@ -109,15 +109,17 @@ spec:
               value: {{ $val | quote }}
             {{- end }}
           volumeMounts:
-            # The homes PVC — mounted read-only at config.homeRoot. This pod
-            # never writes to it; the minted proxy is returned in the
-            # response body only.
+            # The homes PVC — mounted read-only at config.homeRoot. Nothing
+            # is ever written here: the minted proxy goes to a per-user
+            # 0700 dir on the pod's tmpfs /tmp, created by the
+            # voms-proxy-init child running AS the requesting user.
             - name: homes
               mountPath: {{ .Values.homes.mountPath }}
               readOnly: true
-            # readOnlyRootFilesystem requires an explicit writable /tmp for
-            # voms-proxy-init's private per-request tmpdir (minting.py).
-            # tmpfs-backed (Memory) so the proxy's private key material
+            # readOnlyRootFilesystem requires an explicit writable /tmp:
+            # each mint gets a per-user 0700 dir here (proxy_tmp_root),
+            # created and cleaned up by the impersonated child. tmpfs-backed
+            # (Memory) so any key material
             # never touches disk, even transiently.
             - name: tmp
               mountPath: /tmp

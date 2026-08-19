@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     # container never runs a shell as the target user, it just reads a path
     # under the mounted homes PVC.
     home_root: str = "/home"
+    # Pod-local root under which each mint gets a per-user working dir
+    # (``{proxy_tmp_root}/{unixname}``, created BY the impersonated child
+    # under umask 077 — owned by the real uid, mode 0700). Lives on the
+    # pod's tmpfs /tmp; the proxy never touches shared storage and the
+    # homes mount stays read-only.
+    proxy_tmp_root: str = "/tmp/x509"
+    # Proxy filename inside that dir; ``{uid}`` is substituted.
+    proxy_filename_template: str = "x509_u{uid}"
 
     # Path to (or bare name of, resolved via PATH) the voms-proxy-init
     # binary. Configurable so tests can substitute a fake executable and

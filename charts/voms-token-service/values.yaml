@@ -63,10 +63,11 @@ env: {}
 
 homes:
   # The NFS-backed PersistentVolumeClaim holding every AF user's home
-  # directory, mounted READ-ONLY at config.homeRoot. This is the only
-  # storage this pod touches — it never writes to it, and the minted proxy
-  # is returned in the response body, never persisted here or anywhere
-  # else shared. Typically ReadOnlyMany so it can be mounted from any node.
+  # directory, mounted READ-ONLY at config.homeRoot. This pod never writes
+  # to it: the minted proxy lands in a per-user 0700 dir on the pod's own
+  # tmpfs (config.proxyTmpRoot), created by the voms-proxy-init child
+  # running as the requesting user — no chown, no extra capabilities, no
+  # cross-user exposure. Typically ReadOnlyMany so it mounts from any node.
   existingClaim: "af-homes"
   mountPath: "/home"
 

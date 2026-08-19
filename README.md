@@ -17,9 +17,12 @@ This service is the **only** component in the platform that mounts user home
 directories. It receives a user's identity (asserted by the broker, which
 already resolved it from the directory) plus their Globus passphrase over
 HTTPS, runs `voms-proxy-init` against that user's own certificate pair, and
-returns the proxy PEM in the response body. Nothing is written to shared
-storage; the passphrase lives only in memory and is zeroed immediately after
-use.
+returns the proxy PEM in the response body. The proxy is staged in a
+per-user 0700 dir on the pod's own tmpfs — created, written, read back, and
+removed entirely by impersonated subprocesses running AS the requesting
+user, so the service process never touches user-owned files as root and the
+homes mount stays read-only. Nothing is written to shared storage; the
+passphrase lives only in memory and is zeroed immediately after use.
 
 ```
  LLM client                af-mcp-platform                 voms-token-service
