@@ -19,7 +19,6 @@ import asyncio
 import os
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
@@ -35,6 +34,7 @@ from voms_token_service.paths import (
 
 if TYPE_CHECKING:
     from datetime import datetime
+    from pathlib import Path
 
     from voms_token_service.config import Settings
 
