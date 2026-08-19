@@ -13,7 +13,9 @@ import pytest
 from structlog.testing import capture_logs
 
 from tests.conftest import FAKE_CORRECT_PASSPHRASE, _install_fake_bin
+from voms_token_service import app as app_module
 from voms_token_service.config import Settings
+from voms_token_service.minting import CredentialPermissionsError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -277,9 +279,6 @@ class TestCredentialPermissionsResponse:
         make_token: Callable[..., str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from voms_token_service import app as app_module
-        from voms_token_service.minting import CredentialPermissionsError
-
         async def failing_mint(*args: Any, **kwargs: Any):
             raise CredentialPermissionsError
 

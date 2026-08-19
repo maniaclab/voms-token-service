@@ -25,8 +25,6 @@ from voms_token_service.minting import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from tests.conftest import FakeVomsProxyInit
 
 
@@ -274,7 +272,8 @@ class TestImpersonation:
         assert recorded["group"] == 8765
         assert recorded["extra_groups"] == []
         # The per-request tmpdir must be writable by the child.
-        assert chowns and chowns[0][1:] == (4321, 8765)
+        assert chowns
+        assert chowns[0][1:] == (4321, 8765)
 
     async def test_no_impersonation_when_not_root(
         self, settings: Settings, fake_proxy_pem: bytes, monkeypatch: pytest.MonkeyPatch
