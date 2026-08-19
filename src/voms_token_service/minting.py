@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 import structlog
 from cryptography import x509
 
+from voms_token_service.paths import usercert_path, userkey_path
+
 if TYPE_CHECKING:
     from datetime import datetime
 
@@ -142,8 +144,8 @@ async def mint_proxy(
     the stdlib's own process-group kill on expiry, not by cancelling an
     asyncio subprocess transport mid-flight.
     """
-    usercert = Path(settings.home_root) / unixname / ".globus" / "usercert.pem"
-    userkey = Path(settings.home_root) / unixname / ".globus" / "userkey.pem"
+    usercert = usercert_path(settings, unixname)
+    userkey = userkey_path(settings, unixname)
 
     tmpdir = Path(tempfile.mkdtemp(prefix="voms-proxy-"))
     out_path = tmpdir / "proxy.pem"
