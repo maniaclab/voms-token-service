@@ -64,11 +64,16 @@ def jwks(rsa_private_key: rsa.RSAPrivateKey) -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(tmp_path: Path) -> Settings:
+    # The minted proxy is written into the user's home ($HOME/x509_u$UID),
+    # so the endpoint tests' user ("gstark") needs a home under a tmp
+    # home_root — in production the NFS-mounted real home always exists.
+    (tmp_path / "homes" / "gstark").mkdir(parents=True, exist_ok=True)
     return Settings(
         _env_file=None,
         broker_jwks_url="https://broker.test/jwks",
         broker_issuer="https://broker.test",
+        home_root=str(tmp_path / "homes"),
     )
 
 

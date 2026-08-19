@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
+    # The user's home must exist (in production it always does — it's the
+    # NFS-mounted real home): the minted proxy is written there.
+    (tmp_path / "homes" / "gstark").mkdir(parents=True)
     return Settings(_env_file=None, home_root=str(tmp_path / "homes"))
 
 
@@ -243,6 +246,16 @@ class TestImpersonation:
     @staticmethod
     def _recording_run(recorded: dict, fake_proxy_pem: bytes):
         def fake_run(argv, **kwargs):
+            if argv[0] == "bash" and "mkdir" in argv[2]:
+                # The impersonated workdir prep: do what the child would.
+                recorded["prep_user"] = kwargs.get("user")
+                Path(argv[-1]).mkdir(mode=0o700, parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            if argv[0] == "bash" and "cat" in argv[2]:
+                # The impersonated read-back (+ cleanup) of the minted proxy.
+                recorded["readback_argv"] = argv
+                recorded["readback_user"] = kwargs.get("user")
+                return subprocess.CompletedProcess(argv, 0, fake_proxy_pem, b"")
             recorded["argv"] = argv
             recorded.update({k: v for k, v in kwargs.items() if k != "input"})
             out = Path(argv[argv.index("--out") + 1])
@@ -271,9 +284,13 @@ class TestImpersonation:
         assert recorded["user"] == 4321
         assert recorded["group"] == 8765
         assert recorded["extra_groups"] == []
-        # The per-request tmpdir must be writable by the child.
-        assert chowns
-        assert chowns[0][1:] == (4321, 8765)
+        # Workdir prep and read-back are ALSO impersonated — root never
+        # touches user-owned files or dirs.
+        assert recorded["prep_user"] == 4321
+        assert recorded["readback_user"] == 4321
+        # No chown anywhere: the child creates its own 0700 dir under
+        # umask 077, so no ownership fixups are ever needed.
+        assert chowns == []
 
     async def test_no_impersonation_when_not_root(
         self, settings: Settings, fake_proxy_pem: bytes, monkeypatch: pytest.MonkeyPatch
