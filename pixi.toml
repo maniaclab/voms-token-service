@@ -30,6 +30,10 @@ ca-policy-lcg = "*"
 # voms-proxy-init uses to validate the VOMS server's attribute signature.
 # The `voms` package itself ships etc/vomses (atlas -> voms-atlas-auth.cern.ch:443).
 voms-lsc = "*"
+# ca-policy-lcg ships refresh_crls.sh, which needs curl on PATH to fetch
+# each CA's CRL distribution point (debian-slim's runtime has none by
+# default). openssl also comes in transitively already.
+curl = ">=8"
 
 [feature.service.pypi-dependencies]
 voms-token-service = { path = ".", editable = true }

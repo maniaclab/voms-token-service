@@ -55,4 +55,18 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.voms.port }}
+
+    {{- if .Values.crlRefresh.enabled }}
+    # CRL distribution points refresh_crls.sh fetches from (crlRefresh init
+    # container + sidecar) — external to the cluster, hence an ipBlock
+    # rule. Most CAs publish over plain http:// (port 80); some over https.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.crl.cidr | quote }}
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    {{- end }}
 {{- end }}
