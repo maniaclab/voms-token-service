@@ -111,13 +111,16 @@ containerSecurityContext:
 crlRefresh:
   enabled: true
   intervalSeconds: 21600 # 6h
-  # e.g. {limits: {memory: 64Mi}, requests: {cpu: 10m, memory: 32Mi}}
+  # The limit must leave room for dirty page cache: the seed/refresh runs
+  # write the whole CA bundle plus ~250 fetched CRLs into the emptyDir, and
+  # cgroups charge that cache to the container — a 64Mi limit OOM-killed
+  # the init container mid-copy on the AF (exit 137).
   resources:
     limits:
-      memory: 64Mi
+      memory: 256Mi
     requests:
       cpu: 10m
-      memory: 32Mi
+      memory: 64Mi
 
 service:
   # ClusterIP only — the sole intended client is the in-cluster broker.
