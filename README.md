@@ -202,12 +202,14 @@ conda-forge's `voms` package (`pixi.toml`'s `service` feature) — unlike
 condor-token-service's `condor_token_create` (which needs HTCondor's own apt
 repo), the VOMS clients ride in the *same* pixi environment as the Python
 service, so the Containerfile needs no extra package-manager step beyond
-`ca-certificates` (for verifying the broker's JWKS TLS endpoint and the VOMS
-server's TLS). CA trust bundle content, `vomses` VOMS-server directory
-files, and any IGTF trust-anchor package are a deployment-time concern —
-document your site's mechanism for getting those onto the running container
-(a ConfigMap/Secret volume, or a sidecar/init step) rather than baking a
-particular VO's trust config into the image.
+`ca-certificates` (for verifying the broker's JWKS TLS endpoint). Grid trust
+is likewise baked into the same environment: `ca-policy-lcg` (the IGTF CA
+bundle, whose conda activation exports `X509_CERT_DIR`), `voms-lsc` (the
+`vomsdir` `.lsc` files), and the `vomses` shipped by the `voms` package
+itself — no trust-material mounts are needed at deploy time. The bundle is
+pinned per image (refresh it by re-releasing); CRLs, which age much faster,
+are refreshed at pod start and periodically by the `crlRefresh` init/sidecar
+pair (see "CRL freshness" above).
 
 ## Local development
 
