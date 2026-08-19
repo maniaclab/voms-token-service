@@ -89,6 +89,7 @@ code path gets this wrong).
 | Endpoint | Auth | Behavior |
 | --- | --- | --- |
 | `POST /v1/mint` | `Authorization: Bearer <AF Broker Identity Token>` | Body `{"unixname": str, "uid": int, "gid": int, "passphrase": str, "voms": "atlas", "valid": "192:00"}` (`voms`/`valid` optional). Mints a VOMS proxy via `voms-proxy-init` against `{HOME_ROOT}/{unixname}/.globus/{usercert,userkey}.pem`. Returns `{"pem", "dn", "voms_attributes", "expires_at"}`. 400 `{"detail": "bad passphrase"}` when the key's passphrase was wrong (detected from voms-proxy-init's openssl "bad decrypt" stderr); 401 invalid/missing token; 502 on any other minting failure (generic detail — stderr is logged server-side only, never returned). |
+| `GET /v1/preflight/{unixname}` | `Authorization: Bearer <AF Broker Identity Token>` (same as `/v1/mint`) | Credential-readiness checklist for the AF portal's "Grid Certificates" checklist — see below. |
 | `GET /healthz` | none | Always 200. |
 | `GET /readyz` | none | 200 only when `voms-proxy-init` is executable and the broker JWKS is fetchable; 503 otherwise. |
 
@@ -138,6 +139,78 @@ second binary (`voms-proxy-info`). This service's entire design point is
 shelling out to exactly one binary; parsing the certificate this service
 just wrote, with a library already in the dependency graph, gets the same
 information without a second trust boundary.
+
+## Credential preflight (`GET /v1/preflight/{unixname}`)
+
+Minting fails in ways a user can't self-diagnose from the broker's side:
+their `~/.globus` directory doesn't exist yet, the cert/key pair hasn't
+been copied over, or `userkey.pem` is left group/other-readable (which
+`voms-proxy-init` itself refuses to use). This endpoint answers "is this
+user's Globus credential in a state where minting could possibly work?"
+without ever performing a mint — intended to sit behind a broker proxy
+endpoint for the AF portal's "Grid Certificates" checklist (see
+[maniaclab/af-mcp-platform](https://github.com/maniaclab/af-mcp-platform)
+for that follow-up). It also doubles as a mount/root-squash diagnostic: a
+file can look perfectly permissioned and still be unreadable if the NFS
+homes mount, or this pod's `CAP_DAC_READ_SEARCH`, doesn't behave the way
+the mode bits suggest — the only way to know for certain is to actually
+try to open it, which is exactly what this endpoint does.
+
+Authenticated exactly like `/v1/mint` (same broker-issued JWT, verified
+against the same broker JWKS) — a missing or invalid token is still a 401.
+Once authenticated, the endpoint is always 200: a missing directory or a
+bad key mode is data (a per-check `"ok": false`), not an HTTP error, so the
+portal can render the checklist directly from the response body. It never
+reads credential file contents, only `stat()`s and `open()`+immediately
+closes them.
+
+Example request/response:
+
+```
+GET /v1/preflight/kratsg
+Authorization: Bearer <AF Broker Identity Token>
+```
+
+```json
+{
+  "unixname": "kratsg",
+  "root": "/home/kratsg/.globus",
+  "ok": false,
+  "checks": [
+    {"name": "globus_dir", "path": "/home/kratsg/.globus", "exists": true, "ok": true, "detail": null},
+    {"name": "usercert", "path": "/home/kratsg/.globus/usercert.pem", "exists": true, "mode": "0444", "readable_by_service": true, "ok": true, "detail": null},
+    {"name": "userkey", "path": "/home/kratsg/.globus/userkey.pem", "exists": true, "mode": "0644", "readable_by_service": true, "ok": false, "detail": "userkey.pem must not be group/other-accessible (found 0644); run: chmod 400 ~/.globus/userkey.pem"}
+  ]
+}
+```
+
+`mode`/`readable_by_service` are omitted (not `null`) on the `globus_dir`
+check — they don't apply to a directory — via
+`response_model_exclude_none=True`; they're always present for the
+`usercert`/`userkey` checks once the file exists.
+
+**Why `userkey.pem` enforces a mode and `usercert.pem` doesn't.** The
+private key's passphrase is the one secret this service is trusted with;
+`voms-proxy-init` itself already refuses a group/other-readable key, so
+flagging it here (rather than letting the user discover it via an opaque
+mint failure) is the entire point of a *preflight* check. The certificate
+is public by design — X.509 certs are meant to be handed out — so any mode
+is accepted for `usercert.pem`.
+
+**`unixname` path safety.** Unlike `POST /v1/mint` (whose `unixname` comes
+from the request body and only ever reaches `voms-proxy-init --cert/--key`,
+which just fails to find a bogus path), this endpoint stats and opens files
+under the resulting path directly, which makes an unsanitized `unixname` a
+directly exploitable path-traversal primitive. `preflight.validate_unixname`
+rejects anything that isn't a single safe path segment (must start with an
+alphanumeric character or underscore) before `run_preflight` ever touches
+the filesystem — a request for `/v1/preflight/%2e%2e` (percent-encoded
+`..`) gets a 422, never a stat() on a path outside `home_root`.
+
+No Helm chart changes were needed for this endpoint: it's served on the
+same port (8080) behind the same auth as `/v1/mint`, so the existing
+`NetworkPolicy` ingress rule (broker pods only, port 8080) and readiness
+probe already cover it.
 
 ## Deployment
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import uuid
+from dataclasses import asdict
 from typing import Annotated
 
 import structlog
@@ -29,6 +30,12 @@ from voms_token_service.minting import (
     CredentialPermissionsError,
     MintingError,
     mint_proxy,
+)
+from voms_token_service.preflight import (
+    InvalidUnixnameError,
+    PreflightResult,
+    run_preflight,
+    validate_unixname,
 )
 
 logger = structlog.get_logger(__name__)
@@ -53,6 +60,32 @@ class MintResponse(BaseModel):
     dn: str
     voms_attributes: list[str]
     expires_at: str  # ISO8601 UTC
+
+
+class PreflightCheck(BaseModel):
+    name: str
+    path: str
+    exists: bool
+    ok: bool
+    mode: str | None = None
+    readable_by_service: bool | None = None
+    detail: str | None = None
+
+
+class PreflightResponse(BaseModel):
+    unixname: str
+    root: str
+    ok: bool
+    checks: list[PreflightCheck]
+
+
+def _to_preflight_response(result: PreflightResult) -> PreflightResponse:
+    return PreflightResponse(
+        unixname=result.unixname,
+        root=result.root,
+        ok=result.ok,
+        checks=[PreflightCheck(**asdict(check)) for check in result.checks],
+    )
 
 
 def _audit(
@@ -207,6 +240,46 @@ async def mint(
         voms_attributes=minted.voms_attributes,
         expires_at=minted.expires_at.isoformat(),
     )
+
+
+@router.get(
+    "/v1/preflight/{unixname}",
+    response_model=PreflightResponse,
+    response_model_exclude_none=True,
+)
+async def preflight(
+    unixname: str,
+    request: Request,
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
+    ],
+) -> PreflightResponse:
+    """Grid-certificate readiness checklist for the AF portal, authenticated
+    exactly like /v1/mint. Always 200 once authenticated — a missing
+    directory or a bad key mode is data (``ok: false`` on the relevant
+    check), not an error. Never reads credential file contents; every check
+    only stats or open()+close()s a file.
+    """
+    settings: Settings = request.app.state.settings
+
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    await verify_broker_token(credentials.credentials, settings)
+
+    try:
+        validate_unixname(unixname)
+    except InvalidUnixnameError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="invalid unixname",
+        ) from None
+
+    result = run_preflight(settings, unixname)
+    return _to_preflight_response(result)
 
 
 @router.get("/healthz")
