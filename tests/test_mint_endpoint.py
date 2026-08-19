@@ -297,3 +297,35 @@ class TestCredentialPermissionsResponse:
 
         assert resp.status_code == 422
         assert "chmod 400" in resp.json()["detail"]
+
+
+class TestMintUnixnameValidation:
+    async def test_traversal_unixname_is_422_and_never_reaches_minting(
+        self,
+        client: httpx.AsyncClient,
+        make_token: Callable[..., str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+
+        called = False
+
+        async def recording_mint(*args: Any, **kwargs: Any):
+            nonlocal called
+            called = True
+            raise AssertionError("mint_proxy must not be reached")
+
+        monkeypatch.setattr(app_module, "mint_proxy", recording_mint)
+
+        resp = await client.post(
+            "/v1/mint",
+            json={
+                "unixname": "../root",
+                "uid": 12345,
+                "gid": 12345,
+                "passphrase": FAKE_CORRECT_PASSPHRASE,
+            },
+            headers=_auth(make_token()),
+        )
+
+        assert resp.status_code == 422
+        assert called is False
