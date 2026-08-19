@@ -268,3 +268,33 @@ class TestReadyz:
             resp = await client.get("/readyz")
         assert resp.status_code == 503
         assert "voms-proxy-init" in resp.json()["detail"]
+
+
+class TestCredentialPermissionsResponse:
+    async def test_permission_rejection_is_422_with_actionable_detail(
+        self,
+        client: httpx.AsyncClient,
+        make_token: Callable[..., str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from voms_token_service import app as app_module
+        from voms_token_service.minting import CredentialPermissionsError
+
+        async def failing_mint(*args: Any, **kwargs: Any):
+            raise CredentialPermissionsError
+
+        monkeypatch.setattr(app_module, "mint_proxy", failing_mint)
+
+        resp = await client.post(
+            "/v1/mint",
+            json={
+                "unixname": "gstark",
+                "uid": 12345,
+                "gid": 12345,
+                "passphrase": FAKE_CORRECT_PASSPHRASE,
+            },
+            headers=_auth(make_token()),
+        )
+
+        assert resp.status_code == 422
+        assert "chmod 400" in resp.json()["detail"]

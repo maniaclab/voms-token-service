@@ -24,7 +24,12 @@ from pydantic import BaseModel, Field, SecretStr
 from voms_token_service.config import Settings, get_settings
 from voms_token_service.identity import get_jwks, peek_sub, verify_broker_token
 from voms_token_service.logging import configure_logging
-from voms_token_service.minting import BadPassphraseError, MintingError, mint_proxy
+from voms_token_service.minting import (
+    BadPassphraseError,
+    CredentialPermissionsError,
+    MintingError,
+    mint_proxy,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -132,7 +137,15 @@ async def mint(
     # of reach of that discipline.
     passphrase_buf = bytearray(body.passphrase.get_secret_value().encode())
     try:
-        minted = await mint_proxy(body.unixname, passphrase_buf, voms, valid, settings)
+        minted = await mint_proxy(
+            body.unixname,
+            passphrase_buf,
+            voms,
+            valid,
+            settings,
+            uid=body.uid,
+            gid=body.gid,
+        )
     except BadPassphraseError:
         _audit(
             subject=subject,
@@ -145,6 +158,23 @@ async def mint(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="bad passphrase",
+        ) from None
+    except CredentialPermissionsError as exc:
+        # User-actionable (fix file ownership/mode) — 422 so the broker
+        # neither counts it against the passphrase rate limiter (400) nor
+        # tells the user to "retry later" (502). The message is a fixed
+        # string from minting.py, never voms-proxy-init's stderr.
+        _audit(
+            subject=subject,
+            unixname=body.unixname,
+            dn_sha256=None,
+            jti=jti,
+            outcome="denied",
+            request_id=request_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
         ) from None
     except MintingError as exc:
         # Generic detail only — voms-proxy-init's stderr was logged

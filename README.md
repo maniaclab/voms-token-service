@@ -161,7 +161,14 @@ The Helm chart at `charts/voms-token-service/` encodes the privilege model:
   chart retains exactly `CAP_DAC_READ_SEARCH` (read-only bypass; not the
   broader read+write+execute `CAP_DAC_OVERRIDE`) alongside `runAsUser: 0` —
   the minimum privilege that can read arbitrary users' files it doesn't
-  own. Everything else stays locked down: read-only root filesystem
+  own — plus `CAP_SETUID`/`CAP_SETGID`, because the `voms-proxy-init`
+  **child runs as the requesting user** (grid sslutils requires the key be
+  *owned* by the process's effective uid, so a root-run child rejects every
+  user's key with "key must only be readable by the user"; impersonation
+  also makes NFS homes access carry the real uid). A key with group/other
+  permission bits is rejected with an actionable 422 (fix: `chmod 400`),
+  distinct from both bad-passphrase (400, rate-limited by the broker) and
+  infra failures (502, retryable). Everything else stays locked down: read-only root filesystem
   (voms-proxy-init's private tmpdir is a `Memory`-backed `emptyDir` at
   `/tmp`, so proxy key material never touches disk even transiently), no
   privilege escalation, `RuntimeDefault` seccomp, no ServiceAccount token.
