@@ -57,6 +57,16 @@ class TestHappyPath:
         assert body["dn"]
         assert isinstance(body["voms_attributes"], list)
 
+    async def test_nickname_is_null_when_voms_proxy_info_unavailable(
+        self, client: httpx.AsyncClient, make_token: Callable[..., str]
+    ) -> None:
+        # settings.voms_proxy_info_bin defaults to a nonexistent path (see
+        # tests/conftest.py::settings) — extraction fails closed to None
+        # without the mint itself failing.
+        resp = await client.post("/v1/mint", headers=_auth(make_token()), json=_body())
+        assert resp.status_code == 200
+        assert resp.json()["nickname"] is None
+
     async def test_expires_at_is_iso8601_utc_in_the_future(
         self, client: httpx.AsyncClient, make_token: Callable[..., str]
     ) -> None:
@@ -145,6 +155,37 @@ class TestHappyPath:
         assert broker_token not in logged
         assert "BEGIN CERTIFICATE" not in logged
         assert resp.json()["dn"] not in logged
+
+
+@pytest.mark.usefixtures("fake_voms_proxy_init")
+class TestNicknameResponse:
+    async def test_nickname_present_when_voms_proxy_info_succeeds(
+        self,
+        make_client: Callable[[Settings], httpx.AsyncClient],
+        make_token: Callable[..., str],
+        settings: Settings,
+        tmp_path: Path,
+    ) -> None:
+        info_bin = tmp_path / "fake-voms-proxy-info"
+        info_bin.write_text(
+            '#!/bin/sh\necho "attribute : nickname = gstark (atlas)"\nexit 0\n'
+        )
+        info_bin.chmod(0o755)
+        settings_with_info = Settings(
+            _env_file=None,
+            broker_jwks_url=settings.broker_jwks_url,
+            broker_issuer=settings.broker_issuer,
+            home_root=settings.home_root,
+            voms_proxy_info_bin=str(info_bin),
+        )
+
+        async with make_client(settings_with_info) as authed_client:
+            resp = await authed_client.post(
+                "/v1/mint", headers=_auth(make_token()), json=_body()
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["nickname"] == "gstark"
 
 
 class TestAuthenticationFailures:

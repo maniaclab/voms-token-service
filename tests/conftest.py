@@ -74,6 +74,11 @@ def settings(tmp_path: Path) -> Settings:
         broker_jwks_url="https://broker.test/jwks",
         broker_issuer="https://broker.test",
         home_root=str(tmp_path / "homes"),
+        # Nonexistent by default so mint tests stay hermetic: the nickname
+        # lookup fails closed (None, a logged warning) without shelling out
+        # to whatever real voms-proxy-info happens to be on PATH. Tests that
+        # care about nickname extraction override this explicitly.
+        voms_proxy_info_bin="/nonexistent/voms-proxy-info",
     )
 
 

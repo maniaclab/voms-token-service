@@ -54,3 +54,4 @@ async def test_mint_proxy_against_real_service() -> None:
     assert "BEGIN CERTIFICATE" in body["pem"]
     assert body["dn"]
     assert body["expires_at"]
+    assert "nickname" in body  # best-effort; may legitimately be None

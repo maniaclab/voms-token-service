@@ -95,6 +95,8 @@ spec:
               value: {{ .Values.config.homeRoot | quote }}
             - name: VOMS_PROXY_INIT_BIN
               value: {{ .Values.config.vomsProxyInitBin | quote }}
+            - name: VOMS_PROXY_INFO_BIN
+              value: {{ .Values.config.vomsProxyInfoBin | quote }}
             - name: DEFAULT_VOMS
               value: {{ .Values.config.defaultVoms | quote }}
             - name: DEFAULT_VALID

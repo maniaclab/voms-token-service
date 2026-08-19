@@ -91,7 +91,7 @@ code path gets this wrong).
 
 | Endpoint | Auth | Behavior |
 | --- | --- | --- |
-| `POST /v1/mint` | `Authorization: Bearer <AF Broker Identity Token>` | Body `{"unixname": str, "uid": int, "gid": int, "passphrase": str, "voms": "atlas", "valid": "192:00"}` (`voms`/`valid` optional). Mints a VOMS proxy via `voms-proxy-init` against `{HOME_ROOT}/{unixname}/.globus/{usercert,userkey}.pem`. Returns `{"pem", "dn", "voms_attributes", "expires_at"}`. 400 `{"detail": "bad passphrase"}` when the key's passphrase was wrong (detected from voms-proxy-init's openssl "bad decrypt" stderr); 401 invalid/missing token; 502 on any other minting failure (generic detail — stderr is logged server-side only, never returned). |
+| `POST /v1/mint` | `Authorization: Bearer <AF Broker Identity Token>` | Body `{"unixname": str, "uid": int, "gid": int, "passphrase": str, "voms": "atlas", "valid": "192:00"}` (`voms`/`valid` optional). Mints a VOMS proxy via `voms-proxy-init` against `{HOME_ROOT}/{unixname}/.globus/{usercert,userkey}.pem`. Returns `{"pem", "dn", "voms_attributes", "expires_at", "nickname"}` (`nickname` is a best-effort VOMS-attribute lookup — see below — and is `None` when extraction fails). 400 `{"detail": "bad passphrase"}` when the key's passphrase was wrong (detected from voms-proxy-init's openssl "bad decrypt" stderr); 401 invalid/missing token; 502 on any other minting failure (generic detail — stderr is logged server-side only, never returned). |
 | `GET /v1/preflight/{unixname}` | `Authorization: Bearer <AF Broker Identity Token>` (same as `/v1/mint`) | Credential-readiness checklist for the AF portal's "Grid Certificates" checklist — see below. |
 | `GET /healthz` | none | Always 200. |
 | `GET /readyz` | none | 200 only when `voms-proxy-init` is executable and the broker JWKS is fetchable; 503 otherwise. |
@@ -138,10 +138,23 @@ shebang layer, but the synchronous path sidesteps the question entirely).
 
 DN, VOMS attributes, and the expiry are parsed directly from the resulting
 proxy PEM with the `cryptography` library — **not** by shelling out to a
-second binary (`voms-proxy-info`). This service's entire design point is
-shelling out to exactly one binary; parsing the certificate this service
-just wrote, with a library already in the dependency graph, gets the same
-information without a second trust boundary.
+second binary (`voms-proxy-info`). This service's design point is minting
+via exactly one binary; parsing the certificate this service just wrote,
+with a library already in the dependency graph, gets the same information
+without a second trust boundary.
+
+The one owner-approved exception is the `nickname` VOMS attribute
+(maniaclab/af-mcp-platform#191): unlike DN/expiry, it lives only in the VOMS
+attribute certificate as rendered by `voms-proxy-info --all` — not in the
+PEM's ASN.1 this service already parses, and not shown by `--text` either.
+`mint_proxy` therefore makes one additional, read-only, impersonated
+`voms-proxy-info --file <out_path> --all` call against the file it just
+minted — strictly before the PEM read-back deletes that file — and treats
+any extraction failure (binary missing, non-zero exit, no matching
+attribute, unparseable output) as best-effort: `nickname: None`, logged as
+a warning, never a mint failure. `nickname` is the caller's CERN/Rucio
+account name, which AF unixnames don't match; the broker stores it for
+downstream services (e.g. rucio-mcp) that need that mapping.
 
 ## Credential preflight (`GET /v1/preflight/{unixname}`)
 
