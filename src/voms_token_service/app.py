@@ -161,6 +161,24 @@ async def mint(
     subject: str = claims["sub"]
     jti: str | None = claims.get("jti")
 
+    # Same path-safety gate as /v1/preflight: unixname becomes a filesystem
+    # path component, so reject anything unsafe before touching paths.
+    try:
+        validate_unixname(body.unixname)
+    except InvalidUnixnameError:
+        _audit(
+            subject=subject,
+            unixname=None,
+            dn_sha256=None,
+            jti=jti,
+            outcome="denied",
+            request_id=request_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="invalid unixname",
+        ) from None
+
     voms = body.voms or settings.default_voms
     valid = body.valid or settings.default_valid
 
