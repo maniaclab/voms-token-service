@@ -36,6 +36,7 @@ anyio = ">=4.0"
 ruff = ">=0.4"
 mypy = ">=1.10"
 pre-commit = ">=3.7"
+tbump = ">=6.7.0"
 
 # Each task name must be defined in exactly one feature: pixi resolves
 # duplicate names across features nondeterministically.
