@@ -21,11 +21,11 @@ RUN echo '#!/bin/bash' > /app/entrypoint.sh && \
 # Final stage: debian:bookworm-slim, matching condor-token-service's
 # Containerfile.broker layout (and staying binary-compatible with the
 # pixi-built environment copied from the builder stage). ca-certificates is
-# the only extra package needed at runtime — httpx needs it to verify the
-# broker's JWKS TLS endpoint, and voms-proxy-init needs a CA bundle to
-# verify the VOMS server it contacts (see the README for how the real IGTF
-# trust bundle and vomses files are mounted in, rather than baked into the
-# image).
+# needed at runtime for httpx to verify the broker's JWKS TLS endpoint.
+# Grid trust is fully baked into the pixi environment: ca-policy-lcg (IGTF
+# CA bundle, whose activation exports X509_CERT_DIR via the entrypoint),
+# voms-lsc (vomsdir .lsc files), and the vomses shipped by the voms package
+# itself — no mounts required. Refresh the trust bundle by re-releasing.
 FROM debian:bookworm-slim
 WORKDIR /app
 

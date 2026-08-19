@@ -22,6 +22,18 @@ structlog = ">=24.4"
 # conda-forge, so no apt repo dance is needed in the Containerfile — the
 # binary rides in the same pixi environment as the Python service.
 voms = ">=2.1"
+# IGTF CA trust bundle; its conda activation script exports X509_CERT_DIR,
+# which the Containerfile's pixi shell-hook entrypoint bakes into the image
+# — voms-proxy-init and the JWKS fetch both verify TLS against it.
+ca-policy-lcg = "*"
+# vomsdir .lsc files for the LHC VOs (etc/grid-security/vomsdir/...), which
+# voms-proxy-init uses to validate the VOMS server's attribute signature.
+# The `voms` package itself ships etc/vomses (atlas -> voms-atlas-auth.cern.ch:443).
+voms-lsc = "*"
+# ca-policy-lcg ships refresh_crls.sh, which needs curl on PATH to fetch
+# each CA's CRL distribution point (debian-slim's runtime has none by
+# default). openssl also comes in transitively already.
+curl = ">=8"
 
 [feature.service.pypi-dependencies]
 voms-token-service = { path = ".", editable = true }

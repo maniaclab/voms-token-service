@@ -56,3 +56,17 @@ Image reference.
 {{- define "voms-token-service.image" -}}
 {{- printf "%s/%s:%s" .Values.image.registry .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) }}
 {{- end }}
+
+{{/*
+Path to the IGTF certificates directory as exported by X509_CERT_DIR,
+baked in by the Containerfile's pixi shell-hook entrypoint
+(activate-ca-policy-lcg.sh sets X509_CERT_DIR=$CONDA_PREFIX/etc/grid-security/certificates,
+and CONDA_PREFIX is fixed at /app/.pixi/envs/service — see Containerfile).
+When crlRefresh is enabled, a writable emptyDir is mounted over this exact
+path so refresh_crls.sh can rewrite the *.r0 CRL files despite
+readOnlyRootFilesystem; must match X509_CERT_DIR byte-for-byte or the
+overlay shadows the wrong directory.
+*/}}
+{{- define "voms-token-service.certificatesPath" -}}
+/app/.pixi/envs/service/etc/grid-security/certificates
+{{- end }}

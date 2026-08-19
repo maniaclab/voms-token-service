@@ -41,6 +41,38 @@ spec:
       # seccomp).
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.crlRefresh.enabled }}
+      initContainers:
+        # Seeds the writable "certificates" emptyDir from the image's
+        # baked IGTF bundle, then does a best-effort first CRL refresh.
+        # entrypoint.sh's pixi activation gives us PATH (openssl, curl) and
+        # X509_CERT_DIR — pointing at the BAKED directory here, since
+        # nothing is mounted over it in this container.
+        - name: seed-certificates
+          image: {{ include "voms-token-service.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/app/entrypoint.sh"]
+          args:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              cp -a "$X509_CERT_DIR/." /certificates/
+              cd /certificates
+              bash ./refresh_crls.sh || echo "WARNING: initial CRL refresh failed; continuing with baked CRLs"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: certificates
+              mountPath: /certificates
+          {{- with .Values.crlRefresh.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- end }}
       containers:
         - name: voms-token-service
           image: {{ include "voms-token-service.image" . }}
@@ -89,6 +121,15 @@ spec:
             # never touches disk, even transiently.
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.crlRefresh.enabled }}
+            # Overlays the baked X509_CERT_DIR with the writable emptyDir
+            # so the init container's seed + the sidecar's periodic
+            # refresh are visible here too — zero env overrides needed:
+            # entrypoint.sh's baked `export X509_CERT_DIR=...` already
+            # points at this exact path.
+            - name: certificates
+              mountPath: {{ include "voms-token-service.certificatesPath" . }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -103,6 +144,37 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- if .Values.crlRefresh.enabled }}
+        # Periodically re-runs ca-policy-lcg's refresh_crls.sh against the
+        # same writable emptyDir the main container mounts, so its
+        # X509_CERT_DIR stays current between pod restarts. Locked down:
+        # no homes mount, no DAC_READ_SEARCH — it never touches user
+        # files, only its own certificates overlay.
+        - name: crl-refresh
+          image: {{ include "voms-token-service.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/app/entrypoint.sh"]
+          args:
+            - bash
+            - -c
+            - |
+              while true; do
+                sleep {{ .Values.crlRefresh.intervalSeconds }}
+                bash "$X509_CERT_DIR/refresh_crls.sh" || echo "WARNING: periodic CRL refresh failed; will retry next interval"
+              done
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: certificates
+              mountPath: {{ include "voms-token-service.certificatesPath" . }}
+          {{- with .Values.crlRefresh.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
       volumes:
         - name: homes
           persistentVolumeClaim:
@@ -111,3 +183,7 @@ spec:
         - name: tmp
           emptyDir:
             medium: Memory
+        {{- if .Values.crlRefresh.enabled }}
+        - name: certificates
+          emptyDir: {}
+        {{- end }}

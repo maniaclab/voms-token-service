@@ -166,12 +166,30 @@ The Helm chart at `charts/voms-token-service/` encodes the privilege model:
   `/tmp`, so proxy key material never touches disk even transiently), no
   privilege escalation, `RuntimeDefault` seccomp, no ServiceAccount token.
 - **NetworkPolicy** — ingress only from the broker pods; egress limited to
-  DNS, the broker JWKS origin, and the VOMS server(s) `voms-proxy-init`
-  contacts (an `ipBlock` rule, since VOMS servers are external to the
-  cluster and DNS names can't appear directly in a `NetworkPolicy`; restrict
-  `networkPolicy.voms.cidr` to your VO's real server IPs in production).
+  DNS, the broker JWKS origin, the VOMS server(s) `voms-proxy-init`
+  contacts, and (when `crlRefresh.enabled`) the CRL distribution points
+  `refresh_crls.sh` fetches from (all `ipBlock` rules, since these servers
+  are external to the cluster and DNS names can't appear directly in a
+  `NetworkPolicy`; restrict `networkPolicy.voms.cidr` and
+  `networkPolicy.crl.cidr` to real server IPs in production).
 - **No ConfigMap** — all configuration is env-from-values, same as
   condor-token-service.
+- **CRL freshness (`crlRefresh.*`).** The baked-in IGTF CA bundle
+  (`ca-policy-lcg`) is only as fresh as the last image build, but its CRLs
+  (the `*.r0` files under `X509_CERT_DIR`) go stale much faster — hours to
+  days, depending on the CA. A Kubernetes CronJob can't help here: it runs
+  in a separate pod and has no way to write into this Deployment's pod's
+  `emptyDir`, so refreshing has to happen from inside the same pod. A
+  `certificates` `emptyDir` is mounted over the baked `X509_CERT_DIR` path
+  in the main container; an init container (`seed-certificates`) copies the
+  baked bundle into it and does a best-effort first refresh (a network blip
+  here must not block pod startup — the baked `.r0` files are a valid
+  fallback); and a locked-down sidecar (`crl-refresh`, no homes mount, no
+  `DAC_READ_SEARCH`) re-runs `ca-policy-lcg`'s `refresh_crls.sh` every
+  `crlRefresh.intervalSeconds` (default 6h) thereafter. CRLs also get a
+  fresh pull on every pod restart, via the init container. Set
+  `crlRefresh.enabled: false` to skip all of this and use the baked-in CRLs
+  as-is for the image's lifetime.
 
 ```bash
 helm lint charts/voms-token-service
@@ -184,12 +202,14 @@ conda-forge's `voms` package (`pixi.toml`'s `service` feature) — unlike
 condor-token-service's `condor_token_create` (which needs HTCondor's own apt
 repo), the VOMS clients ride in the *same* pixi environment as the Python
 service, so the Containerfile needs no extra package-manager step beyond
-`ca-certificates` (for verifying the broker's JWKS TLS endpoint and the VOMS
-server's TLS). CA trust bundle content, `vomses` VOMS-server directory
-files, and any IGTF trust-anchor package are a deployment-time concern —
-document your site's mechanism for getting those onto the running container
-(a ConfigMap/Secret volume, or a sidecar/init step) rather than baking a
-particular VO's trust config into the image.
+`ca-certificates` (for verifying the broker's JWKS TLS endpoint). Grid trust
+is likewise baked into the same environment: `ca-policy-lcg` (the IGTF CA
+bundle, whose conda activation exports `X509_CERT_DIR`), `voms-lsc` (the
+`vomsdir` `.lsc` files), and the `vomses` shipped by the `voms` package
+itself — no trust-material mounts are needed at deploy time. The bundle is
+pinned per image (refresh it by re-releasing); CRLs, which age much faster,
+are refreshed at pod start and periodically by the `crlRefresh` init/sidecar
+pair (see "CRL freshness" above).
 
 ## Local development
 

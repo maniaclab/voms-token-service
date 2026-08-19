@@ -93,6 +93,32 @@ containerSecurityContext:
     drop: [ALL]
     add: [DAC_READ_SEARCH]
 
+# CRL (Certificate Revocation List) refresh for the baked-in IGTF CA bundle
+# (ca-policy-lcg, see pixi.toml). CRLs go stale on the order of hours to
+# days — much faster than the CA bundle itself, which only changes on image
+# rebuild — so baking them in once is not enough. This can't be a
+# Kubernetes CronJob: a CronJob runs in a SEPARATE pod on its own schedule
+# and has no way to write into THIS Deployment's pod's emptyDir, so the
+# refresh has to happen from a sidecar inside the same pod instead. When
+# enabled, a writable emptyDir is mounted over the baked certificates
+# directory (X509_CERT_DIR) in the main container; an init container seeds
+# it from the image's baked bundle and does a best-effort first refresh
+# (a network blip must not block pod startup — the baked .r0 files are a
+# valid fallback); and a sidecar re-runs ca-policy-lcg's refresh_crls.sh
+# every intervalSeconds thereafter. CRLs also get a fresh pull on every pod
+# restart, via the init container. When disabled, the baked-in CRLs are
+# used as-is for the lifetime of the image (re-release to refresh them).
+crlRefresh:
+  enabled: true
+  intervalSeconds: 21600 # 6h
+  # e.g. {limits: {memory: 64Mi}, requests: {cpu: 10m, memory: 32Mi}}
+  resources:
+    limits:
+      memory: 64Mi
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
 service:
   # ClusterIP only — the sole intended client is the in-cluster broker.
   port: 8080
@@ -124,13 +150,21 @@ networkPolicy:
         app.kubernetes.io/component: broker
     port: 8080
   # Egress: the VOMS server(s) voms-proxy-init actually contacts (e.g.
-  # voms2.cern.ch:15001 for atlas). These are external to the cluster and
+  # voms-atlas-auth.cern.ch:443 for atlas — the endpoint named in the
+  # image's baked-in vomses file). These are external to the cluster and
   # their IPs are not broker/namespace-selectable, so this is an ipBlock
   # rule — 0.0.0.0/0 by default (restrict this to your VO's real VOMS
   # server IPs/CIDRs; DNS names can't be used directly in a NetworkPolicy).
   voms:
     cidr: "0.0.0.0/0"
-    port: 15001
+    port: 443
+  # Egress: the CRL distribution points refresh_crls.sh fetches from (one
+  # per CA's *.crl_url file, see ca-policy-lcg) — external to the cluster,
+  # hence an ipBlock rule. Most are plain http:// (port 80); some are
+  # https. Only present when crlRefresh.enabled (the init container and
+  # sidecar below are the only consumers of this egress).
+  crl:
+    cidr: "0.0.0.0/0"
 
 # e.g. {limits: {memory: 256Mi}, requests: {cpu: 50m, memory: 128Mi}}
 resources: {}
