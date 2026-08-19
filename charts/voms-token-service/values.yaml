@@ -76,10 +76,14 @@ homes:
 # CAP_DAC_READ_SEARCH (see containerSecurityContext below) — root alone does
 # not bypass file permission checks once ALL capabilities are dropped.
 # CAP_DAC_READ_SEARCH is the minimal capability for this: it grants read
-# access, not CAP_DAC_OVERRIDE's read+write+execute. Everything else stays
-# locked down: the root filesystem is read-only (voms-proxy-init writes only
-# to the tmpfs /tmp emptyDir below), privilege escalation is disabled,
-# seccomp is RuntimeDefault, and no ServiceAccount token is mounted.
+# access, not CAP_DAC_OVERRIDE's read+write+execute. CAP_SETUID/CAP_SETGID
+# are needed because the voms-proxy-init CHILD runs as the requesting user
+# (grid sslutils requires the key be OWNED by the effective uid, and running
+# as the real uid also makes NFS homes access carry the right identity —
+# see minting.py). Everything else stays locked down: the root filesystem is
+# read-only (voms-proxy-init writes only to the tmpfs /tmp emptyDir below),
+# privilege escalation is disabled, seccomp is RuntimeDefault, and no
+# ServiceAccount token is mounted.
 podSecurityContext:
   runAsUser: 0
   runAsGroup: 0
@@ -91,7 +95,7 @@ containerSecurityContext:
   allowPrivilegeEscalation: false
   capabilities:
     drop: [ALL]
-    add: [DAC_READ_SEARCH]
+    add: [DAC_READ_SEARCH, SETUID, SETGID]
 
 # CRL (Certificate Revocation List) refresh for the baked-in IGTF CA bundle
 # (ca-policy-lcg, see pixi.toml). CRLs go stale on the order of hours to

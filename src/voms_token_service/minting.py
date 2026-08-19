@@ -11,6 +11,7 @@ removed once its contents have been read back into memory.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 import tempfile
@@ -40,6 +41,25 @@ class MintingError(Exception):
 
 class BadPassphraseError(Exception):
     """Raised when voms-proxy-init fails because the private key passphrase was wrong."""
+
+
+_CREDENTIAL_PERMISSIONS_DETAIL = (
+    "~/.globus/userkey.pem must be owned by you and readable only by you "
+    "(mode 0400 or 0600). Fix with: chmod 400 ~/.globus/userkey.pem"
+)
+
+
+class CredentialPermissionsError(Exception):
+    """Raised when voms-proxy-init rejects the user's key file ownership/permissions.
+
+    Distinct from BadPassphraseError (must NOT count against the broker's
+    unlock rate limiter) and from MintingError (retrying cannot help — the
+    user has to fix their files). The message is a fixed, user-actionable
+    string, never voms-proxy-init's stderr.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(_CREDENTIAL_PERMISSIONS_DETAIL)
 
 
 @dataclass(frozen=True)
@@ -79,12 +99,30 @@ def _is_bad_passphrase(stderr: str) -> bool:
     return any(marker in lowered for marker in _BAD_PASSPHRASE_MARKERS)
 
 
+# Substrings grid sslutils prints when it rejects the key file itself. The
+# check behind these is ownership + mode: the key must be OWNED by the
+# process's effective uid and carry no group/other bits — which is also why
+# minting impersonates the requesting user (see mint_proxy).
+_CREDENTIAL_PERMISSION_MARKERS: tuple[str, ...] = (
+    "bad file system permissions",
+    "key must only be readable",
+)
+
+
+def _is_credential_permissions(stderr: str) -> bool:
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _CREDENTIAL_PERMISSION_MARKERS)
+
+
 async def mint_proxy(
     unixname: str,
     passphrase: bytearray,
     voms: str,
     valid: str,
     settings: Settings,
+    *,
+    uid: int,
+    gid: int,
 ) -> MintedProxy:
     """Mint a VOMS proxy for *unixname* by shelling out to voms-proxy-init.
 
@@ -109,6 +147,20 @@ async def mint_proxy(
 
     tmpdir = Path(tempfile.mkdtemp(prefix="voms-proxy-"))
     out_path = tmpdir / "proxy.pem"
+
+    # voms-proxy-init requires the key file be OWNED by the process's
+    # effective uid (grid sslutils checks ownership, not just mode), so when
+    # running as root — the production pod — the child runs AS the
+    # requesting user (CAP_SETUID/CAP_SETGID in the chart). This also makes
+    # the NFS homes access happen as the real uid. The tmpdir must then be
+    # writable by that user. Outside the pod (tests, local dev as non-root)
+    # no impersonation is possible or needed.
+    run_user: int | None = None
+    run_group: int | None = None
+    run_extra_groups: list[int] | None = None
+    if os.geteuid() == 0:
+        os.chown(tmpdir, uid, gid)
+        run_user, run_group, run_extra_groups = uid, gid, []
     argv = [
         settings.voms_proxy_init_bin,
         "--rfc",
@@ -141,6 +193,9 @@ async def mint_proxy(
                     capture_output=True,
                     check=False,
                     timeout=settings.proxy_init_timeout_seconds,
+                    user=run_user,
+                    group=run_group,
+                    extra_groups=run_extra_groups,
                 ),
             )
         except OSError as exc:
@@ -167,11 +222,23 @@ async def mint_proxy(
             stderr_text = result.stderr.decode(errors="replace").strip()
             if _is_bad_passphrase(stderr_text):
                 raise BadPassphraseError("bad passphrase")
+            if _is_credential_permissions(stderr_text):
+                logger.error(
+                    "voms_proxy_init_credential_permissions",
+                    returncode=result.returncode,
+                    stderr=stderr_text,
+                    unixname=unixname,
+                    uid=uid,
+                    gid=gid,
+                )
+                raise CredentialPermissionsError
             logger.error(
                 "voms_proxy_init_failed",
                 returncode=result.returncode,
                 stderr=stderr_text,
                 unixname=unixname,
+                uid=uid,
+                gid=gid,
             )
             raise MintingError(f"voms-proxy-init exited {result.returncode}")
 
