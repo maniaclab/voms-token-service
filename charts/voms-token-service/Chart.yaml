@@ -2,8 +2,8 @@ apiVersion: v2
 name: voms-token-service
 description: VOMS proxy minting for the UChicago ATLAS Analysis Facility MCP platform
 type: application
-version: 0.1.5
-appVersion: "0.1.5"
+version: 0.2.0
+appVersion: "0.2.0"
 keywords: [voms, x509, proxy, mcp, atlas, hep, analysis-facility]
 home: https://github.com/maniaclab/voms-token-service
 sources: [https://github.com/maniaclab/voms-token-service]
