@@ -51,6 +51,10 @@ config:
   # Path to (or PATH-resolved name of) the voms-proxy-init binary in the
   # container image.
   vomsProxyInitBin: "voms-proxy-init"
+  # Path to (or PATH-resolved name of) the voms-proxy-info binary in the
+  # container image — used only for the best-effort nickname extraction
+  # after a successful mint (see minting.py), never to mint the proxy.
+  vomsProxyInfoBin: "voms-proxy-info"
   # Defaults applied when a mint request omits voms/valid.
   defaultVoms: "atlas"
   defaultValid: "192:00"

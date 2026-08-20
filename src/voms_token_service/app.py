@@ -60,6 +60,10 @@ class MintResponse(BaseModel):
     dn: str
     voms_attributes: list[str]
     expires_at: str  # ISO8601 UTC
+    # The VOMS "nickname" attribute (typically the CERN/Rucio account name,
+    # which AF unixnames don't match) — best-effort, None when
+    # voms-proxy-info extraction fails (see minting.py:_fetch_nickname).
+    nickname: str | None = None
 
 
 class PreflightCheck(BaseModel):
@@ -257,6 +261,7 @@ async def mint(
         dn=minted.dn,
         voms_attributes=minted.voms_attributes,
         expires_at=minted.expires_at.isoformat(),
+        nickname=minted.nickname,
     )
 
 

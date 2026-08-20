@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -79,6 +80,7 @@ class MintedProxy:
     dn: str
     voms_attributes: list[str]
     expires_at: datetime
+    nickname: str | None
 
 
 def _zero_bytearray(buf: bytearray) -> None:
@@ -291,6 +293,19 @@ async def mint_proxy(
             )
             raise MintingError(f"voms-proxy-init exited {result.returncode}")
 
+        # Strictly before the read-back below: that step deletes out_path
+        # (`cat && rm -f`), and voms-proxy-info needs the file to still be
+        # there.
+        nickname = await _fetch_nickname(
+            out_path,
+            voms,
+            unixname,
+            settings,
+            run_user=run_user,
+            run_group=run_group,
+            run_extra_groups=run_extra_groups,
+        )
+
         proxy_pem = await _read_proxy_as_user(
             out_path,
             unixname,
@@ -310,6 +325,7 @@ async def mint_proxy(
         dn=dn,
         voms_attributes=voms_attributes,
         expires_at=expires_at,
+        nickname=nickname,
     )
 
 
@@ -337,6 +353,69 @@ async def _run_as_user(
             env=env,
         ),
     )
+
+
+def _extract_nickname(all_output: str, voms: str) -> str | None:
+    """Parse the ``nickname`` VOMS attribute for *voms* out of ``voms-proxy-info --all`` output.
+
+    Mirrors panda-client's own extraction regex
+    (``nickname\\s*=\\s*([^\\s]+)\\s*\\(<vo>\\)``). ``--all`` prints one
+    ``attribute : ... = ...`` line per VOMS attribute across every VO the
+    proxy carries, so matching is filtered by *voms* — never by positional
+    field splitting — to guarantee a same-named attribute from a different
+    VO can never be picked up by accident.
+    """
+    pattern = re.compile(r"nickname\s*=\s*(\S+)\s*\(" + re.escape(voms) + r"\)")
+    match = pattern.search(all_output)
+    return match.group(1) if match else None
+
+
+async def _fetch_nickname(
+    out_path: Path,
+    voms: str,
+    unixname: str,
+    settings: Settings,
+    *,
+    run_user: int | None,
+    run_group: int | None,
+    run_extra_groups: list[int] | None,
+) -> str | None:
+    """Best-effort ``nickname`` VOMS-attribute lookup for the just-minted proxy.
+
+    Runs ``voms-proxy-info --file <out_path> --all`` — impersonated the same
+    way as voms-proxy-init — strictly before the caller's read-back step
+    deletes *out_path*. This is a read-only call against a file this
+    service itself just minted, the one owner-approved exception to
+    shelling out to a single binary (see this module's docstring and
+    ``_parse_proxy_pem``). Any failure here — binary missing, non-zero
+    exit, timeout, no matching attribute, unparseable output — is logged as
+    a warning and yields ``None``; it must never turn an already-successful
+    mint into a failure.
+    """
+    try:
+        result = await _run_as_user(
+            [settings.voms_proxy_info_bin, "--file", str(out_path), "--all"],
+            run_user=run_user,
+            run_group=run_group,
+            run_extra_groups=run_extra_groups,
+        )
+    except Exception as exc:  # noqa: BLE001  # best-effort: must never fail the mint
+        logger.warning("voms_proxy_info_failed", unixname=unixname, error=str(exc))
+        return None
+
+    if result.returncode != 0:
+        logger.warning(
+            "voms_proxy_info_nonzero_exit",
+            unixname=unixname,
+            returncode=result.returncode,
+            stderr=result.stderr.decode(errors="replace").strip(),
+        )
+        return None
+
+    nickname = _extract_nickname(result.stdout.decode(errors="replace"), voms)
+    if nickname is None:
+        logger.warning("voms_proxy_info_no_nickname", unixname=unixname, voms=voms)
+    return nickname
 
 
 async def _read_proxy_as_user(
@@ -397,12 +476,17 @@ def _parse_proxy_pem(proxy_pem: bytes) -> tuple[str, list[str], datetime]:
 
     Parsed directly with the ``cryptography`` library rather than by
     shelling out to a second binary (``voms-proxy-info``) — this service's
-    entire design point is shelling out to exactly one binary
-    (voms-proxy-init). The proxy PEM may contain multiple certs (the proxy
-    chain) plus a private key; only the first certificate block — the newly
-    minted proxy cert, whose *issuer* is the user's own identity — carries
-    the DN and validity this service reports (mirrors
-    af-mcp-platform's credentials/x509.py:_parse_proxy_pem).
+    design point is minting via exactly one binary (voms-proxy-init). The
+    one owner-approved exception is ``_fetch_nickname`` below: it does
+    invoke ``voms-proxy-info --all``, read-only, against the file this
+    service just minted, because the ``nickname`` VOMS attribute lives only
+    in the VOMS attribute certificate that ``--all`` renders — it is not
+    part of the PEM this function parses, and ``--text`` does not show it
+    either (maniaclab/af-mcp-platform#191). The proxy PEM may contain
+    multiple certs (the proxy chain) plus a private key; only the first
+    certificate block — the newly minted proxy cert, whose *issuer* is the
+    user's own identity — carries the DN and validity this service reports
+    (mirrors af-mcp-platform's credentials/x509.py:_parse_proxy_pem).
     """
     pem_blocks = proxy_pem.split(b"-----END CERTIFICATE-----")
     first_cert_pem = pem_blocks[0] + b"-----END CERTIFICATE-----\n"

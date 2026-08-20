@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     # non-standard installs can point elsewhere.
     voms_proxy_init_bin: str = "voms-proxy-init"
 
+    # Path to (or bare name of, resolved via PATH) the voms-proxy-info
+    # binary, used only for the best-effort `nickname` extraction after a
+    # successful mint (see minting.py's module docstring and
+    # mint_proxy/_fetch_nickname) — never to mint the proxy itself.
+    # Configurable for the same reasons as voms_proxy_init_bin above.
+    voms_proxy_info_bin: str = "voms-proxy-info"
+
     # Defaults applied when the mint request omits `voms`/`valid`.
     default_voms: str = "atlas"
     default_valid: str = "192:00"
