@@ -41,8 +41,25 @@ spec:
       # seccomp).
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- if .Values.crlRefresh.enabled }}
       initContainers:
+        # The Memory-backed emptyDir Kubernetes creates for /tmp starts with
+        # root:root 0755 — no write permission for others. voms-proxy-init runs
+        # as the requesting user (after SETUID) and must create per-user
+        # subdirectories there, so restore the sticky-bit world-writable mode
+        # that a conventional /tmp carries.
+        - name: fix-tmp-perms
+          image: {{ include "voms-token-service.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["chmod", "1777", "/tmp"]
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+        {{- if .Values.crlRefresh.enabled }}
         # Seeds the writable "certificates" emptyDir from the image's
         # baked IGTF bundle, then does a best-effort first CRL refresh.
         # entrypoint.sh's pixi activation gives us PATH (openssl, curl) and
@@ -72,7 +89,7 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- end }}
+        {{- end }}
       containers:
         - name: voms-token-service
           image: {{ include "voms-token-service.image" . }}
