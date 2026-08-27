@@ -47,7 +47,7 @@ pytest-asyncio = ">=0.23"
 anyio = ">=4.0"
 ruff = ">=0.4"
 mypy = ">=1.10"
-pre-commit = ">=3.7"
+prek = "*"
 tbump = ">=6.7.0"
 
 # Each task name must be defined in exactly one feature: pixi resolves
@@ -56,7 +56,7 @@ tbump = ">=6.7.0"
 lint = { cmd = "ruff check src tests && ruff format --check src tests", description = "Ruff lint + format check" }
 fmt = { cmd = "ruff format src tests && ruff check --fix src tests", description = "Format and auto-fix source" }
 typecheck = { cmd = "mypy src", description = "Type-check service source" }
-pre-commit = { cmd = "pre-commit run --all-files", description = "Run pre-commit hooks on all files" }
+pre-commit = { cmd = "prek run --all-files", description = "Run pre-commit hooks on all files" }
 lint-all = { depends-on = ["lint", "typecheck", "pre-commit"], description = "Everything the CI lint job runs" }
 test = { cmd = "pytest tests/ -v", description = "Service tests" }
 check = { depends-on = ["lint", "typecheck", "test"], description = "Quick check: lint + typecheck + tests" }
