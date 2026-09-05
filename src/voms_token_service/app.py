@@ -340,7 +340,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application = FastAPI(
         title="voms-token-service",
         description="VOMS proxy minting for the AF MCP platform",
-        version="0.2.1",
+        version="0.2.2",
     )
     application.state.settings = settings
     application.include_router(router)
