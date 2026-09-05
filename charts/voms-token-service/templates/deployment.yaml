@@ -46,11 +46,17 @@ spec:
         # root:root 0755 — no write permission for others. voms-proxy-init runs
         # as the requesting user (after SETUID) and must create per-user
         # subdirectories there, so restore the sticky-bit world-writable mode
-        # that a conventional /tmp carries.
+        # that a conventional /tmp carries. /tmp/x509 (config.py's
+        # proxy_tmp_root) gets the same treatment: mint_proxy's `mkdir -p`
+        # runs as the impersonated user too, so if that directory doesn't
+        # exist yet, the FIRST requesting user creates it as a side effect —
+        # owned by them, mode 0700 from their own umask — which then locks
+        # out every other user's per-user subdirectory underneath it. Pinning
+        # it here ahead of time keeps request order from deciding its owner.
         - name: fix-tmp-perms
           image: {{ include "voms-token-service.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["chmod", "1777", "/tmp"]
+          command: ["sh", "-c", "mkdir -p /tmp/x509 && chmod 1777 /tmp /tmp/x509"]
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
