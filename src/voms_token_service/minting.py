@@ -74,6 +74,29 @@ class CredentialPermissionsError(Exception):
         super().__init__(_CREDENTIAL_PERMISSIONS_DETAIL)
 
 
+_CERTIFICATE_EXPIRED_DETAIL = (
+    "Your grid certificate (~/.globus/usercert.pem) has expired. Obtain a "
+    "renewed certificate from your certificate authority, replace "
+    "~/.globus/usercert.pem (and userkey.pem if it was reissued too), and "
+    "try again."
+)
+
+
+class CertificateExpiredError(Exception):
+    """Raised when voms-proxy-init rejects the user's own end-entity certificate as expired.
+
+    Distinct from BadPassphraseError (not a passphrase problem, must NOT
+    count against the broker's unlock rate limiter) and from MintingError
+    (retrying cannot help until the user gets a new certificate — this is
+    not an infra failure, see maniaclab/af-mcp-platform#288). The message is
+    a fixed, user-actionable string, never voms-proxy-init's stderr (which
+    includes the certificate's exact expiry timestamp).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(_CERTIFICATE_EXPIRED_DETAIL)
+
+
 @dataclass(frozen=True)
 class MintedProxy:
     pem: str
@@ -125,6 +148,19 @@ _CREDENTIAL_PERMISSION_MARKERS: tuple[str, ...] = (
 def _is_credential_permissions(stderr: str) -> bool:
     lowered = stderr.lower()
     return any(marker in lowered for marker in _CREDENTIAL_PERMISSION_MARKERS)
+
+
+# Substring grid sslutils prints when the user's own end-entity certificate
+# (~/.globus/usercert.pem) has passed its notAfter — observed verbatim as
+# "ERROR: Certificate has expired on <date>" (maniaclab/af-mcp-platform#288).
+# Distinct from an expired *proxy* (this service always mints a fresh one)
+# and from an expired CA/CRL (an infra concern, not the user's certificate).
+_CERTIFICATE_EXPIRED_MARKERS: tuple[str, ...] = ("certificate has expired",)
+
+
+def _is_certificate_expired(stderr: str) -> bool:
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _CERTIFICATE_EXPIRED_MARKERS)
 
 
 async def mint_proxy(
@@ -283,6 +319,16 @@ async def mint_proxy(
                     gid=gid,
                 )
                 raise CredentialPermissionsError
+            if _is_certificate_expired(stderr_text):
+                logger.error(
+                    "voms_proxy_init_certificate_expired",
+                    returncode=result.returncode,
+                    stderr=stderr_text,
+                    unixname=unixname,
+                    uid=uid,
+                    gid=gid,
+                )
+                raise CertificateExpiredError
             logger.error(
                 "voms_proxy_init_failed",
                 returncode=result.returncode,

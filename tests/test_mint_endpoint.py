@@ -15,7 +15,10 @@ from structlog.testing import capture_logs
 from tests.conftest import FAKE_CORRECT_PASSPHRASE, _install_fake_bin
 from voms_token_service import app as app_module
 from voms_token_service.config import Settings
-from voms_token_service.minting import CredentialPermissionsError
+from voms_token_service.minting import (
+    CertificateExpiredError,
+    CredentialPermissionsError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -338,6 +341,58 @@ class TestCredentialPermissionsResponse:
 
         assert resp.status_code == 422
         assert "chmod 400" in resp.json()["detail"]
+
+
+class TestCertificateExpiredResponse:
+    async def test_expired_certificate_is_422_with_actionable_detail(
+        self,
+        client: httpx.AsyncClient,
+        make_token: Callable[..., str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def failing_mint(*args: Any, **kwargs: Any):
+            raise CertificateExpiredError
+
+        monkeypatch.setattr(app_module, "mint_proxy", failing_mint)
+
+        resp = await client.post(
+            "/v1/mint",
+            json={
+                "unixname": "gwatts",
+                "uid": 44493,
+                "gid": 44493,
+                "passphrase": FAKE_CORRECT_PASSPHRASE,
+            },
+            headers=_auth(make_token()),
+        )
+
+        assert resp.status_code == 422
+        assert "usercert.pem" in resp.json()["detail"]
+
+    async def test_expired_certificate_is_audited_as_denied(
+        self,
+        client: httpx.AsyncClient,
+        make_token: Callable[..., str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def failing_mint(*args: Any, **kwargs: Any):
+            raise CertificateExpiredError
+
+        monkeypatch.setattr(app_module, "mint_proxy", failing_mint)
+
+        with capture_logs() as cap_logs:
+            await client.post(
+                "/v1/mint",
+                json={
+                    "unixname": "gwatts",
+                    "uid": 44493,
+                    "gid": 44493,
+                    "passphrase": FAKE_CORRECT_PASSPHRASE,
+                },
+                headers=_auth(make_token()),
+            )
+        (audit,) = _audit_events(cap_logs)
+        assert audit["outcome"] == "denied"
 
 
 class TestMintUnixnameValidation:

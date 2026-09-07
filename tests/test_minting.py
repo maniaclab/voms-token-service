@@ -20,6 +20,7 @@ from voms_token_service import minting
 from voms_token_service.config import Settings
 from voms_token_service.minting import (
     BadPassphraseError,
+    CertificateExpiredError,
     CredentialPermissionsError,
     MintingError,
     mint_proxy,
@@ -373,6 +374,53 @@ class TestCredentialPermissions:
                 uid=4321,
                 gid=8765,
             )
+
+
+class TestCertificateExpired:
+    async def test_expired_eec_raises_certificate_expired_error(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The real message voms-proxy-init prints when the user's own
+        # ~/.globus/usercert.pem has passed its notAfter (maniaclab/af-mcp-platform#288).
+        stderr = b"ERROR: Certificate has expired on Tue Sep 30 16:22:26 2025 UTC"
+
+        def failing_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 3, b"", stderr)
+
+        monkeypatch.setattr(minting.subprocess, "run", failing_run)
+
+        with pytest.raises(CertificateExpiredError, match=r"usercert\.pem"):
+            await mint_proxy(
+                "gwatts",
+                _passphrase(),
+                "atlas",
+                "192:00",
+                settings,
+                uid=44493,
+                gid=44493,
+            )
+
+    async def test_expired_eec_does_not_leak_stderr(
+        self, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stderr = b"ERROR: Certificate has expired on Tue Sep 30 16:22:26 2025 UTC"
+
+        def failing_run(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 3, b"", stderr)
+
+        monkeypatch.setattr(minting.subprocess, "run", failing_run)
+
+        with pytest.raises(CertificateExpiredError) as excinfo:
+            await mint_proxy(
+                "gwatts",
+                _passphrase(),
+                "atlas",
+                "192:00",
+                settings,
+                uid=44493,
+                gid=44493,
+            )
+        assert "Tue Sep 30" not in str(excinfo.value)
 
 
 class TestExtractNickname:
