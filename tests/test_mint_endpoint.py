@@ -92,15 +92,28 @@ class TestHappyPath:
 
     async def test_explicit_voms_and_valid_override_defaults(
         self,
-        client: httpx.AsyncClient,
+        make_client: Callable[[Settings], httpx.AsyncClient],
         make_token: Callable[..., str],
+        settings: Settings,
         fake_voms_proxy_init: FakeVomsProxyInit,
     ) -> None:
-        resp = await client.post(
-            "/v1/mint",
-            headers=_auth(make_token()),
-            json=_body(voms="cms", valid="24:00"),
+        # "cms" isn't on settings.allowed_voms' default (["atlas"]) — widen
+        # it here since this test is about explicit values overriding
+        # defaults, not about policy enforcement (see TestMintPolicyLimits).
+        settings_with_cms = Settings(
+            _env_file=None,
+            broker_jwks_url=settings.broker_jwks_url,
+            broker_issuer=settings.broker_issuer,
+            home_root=settings.home_root,
+            voms_proxy_info_bin=settings.voms_proxy_info_bin,
+            allowed_voms=["atlas", "cms"],
         )
+        async with make_client(settings_with_cms) as authed_client:
+            resp = await authed_client.post(
+                "/v1/mint",
+                headers=_auth(make_token()),
+                json=_body(voms="cms", valid="24:00"),
+            )
         assert resp.status_code == 200
         recorded = fake_voms_proxy_init.args_file.read_text().split()
         assert recorded[recorded.index("--voms") + 1] == "cms"
@@ -425,3 +438,126 @@ class TestMintUnixnameValidation:
 
         assert resp.status_code == 422
         assert called is False
+
+
+@pytest.mark.usefixtures("fake_voms_proxy_init")
+class TestMintPolicyLimits:
+    async def test_valid_over_max_is_422_and_never_reaches_minting(
+        self,
+        client: httpx.AsyncClient,
+        make_token: Callable[..., str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        called = False
+
+        async def recording_mint(*args: Any, **kwargs: Any):
+            nonlocal called
+            called = True
+            raise AssertionError("mint_proxy must not be reached")
+
+        monkeypatch.setattr(app_module, "mint_proxy", recording_mint)
+
+        # settings.max_valid defaults to "192:00" (see tests/conftest.py).
+        resp = await client.post(
+            "/v1/mint",
+            headers=_auth(make_token()),
+            json=_body(valid="193:00"),
+        )
+
+        assert resp.status_code == 422
+        assert called is False
+
+    async def test_valid_over_max_is_audited_as_denied(
+        self, client: httpx.AsyncClient, make_token: Callable[..., str]
+    ) -> None:
+        with capture_logs() as cap_logs:
+            resp = await client.post(
+                "/v1/mint",
+                headers=_auth(make_token()),
+                json=_body(valid="193:00"),
+            )
+        assert resp.status_code == 422
+        (audit,) = _audit_events(cap_logs)
+        assert audit["outcome"] == "denied"
+
+    async def test_malformed_valid_is_422(
+        self, client: httpx.AsyncClient, make_token: Callable[..., str]
+    ) -> None:
+        resp = await client.post(
+            "/v1/mint",
+            headers=_auth(make_token()),
+            json=_body(valid="not-a-duration"),
+        )
+        assert resp.status_code == 422
+
+    async def test_valid_equal_to_max_is_allowed(
+        self, client: httpx.AsyncClient, make_token: Callable[..., str]
+    ) -> None:
+        # settings.max_valid defaults to "192:00" (see tests/conftest.py).
+        resp = await client.post(
+            "/v1/mint",
+            headers=_auth(make_token()),
+            json=_body(valid="192:00"),
+        )
+        assert resp.status_code == 200
+
+    async def test_voms_not_allowlisted_is_422_and_never_reaches_minting(
+        self,
+        client: httpx.AsyncClient,
+        make_token: Callable[..., str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        called = False
+
+        async def recording_mint(*args: Any, **kwargs: Any):
+            nonlocal called
+            called = True
+            raise AssertionError("mint_proxy must not be reached")
+
+        monkeypatch.setattr(app_module, "mint_proxy", recording_mint)
+
+        # settings.allowed_voms defaults to ["atlas"] (see conftest.py's
+        # settings fixture and Settings.allowed_voms' own default).
+        resp = await client.post(
+            "/v1/mint",
+            headers=_auth(make_token()),
+            json=_body(voms="cms"),
+        )
+
+        assert resp.status_code == 422
+        assert called is False
+
+    async def test_voms_not_allowlisted_is_audited_as_denied(
+        self, client: httpx.AsyncClient, make_token: Callable[..., str]
+    ) -> None:
+        with capture_logs() as cap_logs:
+            resp = await client.post(
+                "/v1/mint",
+                headers=_auth(make_token()),
+                json=_body(voms="cms"),
+            )
+        assert resp.status_code == 422
+        (audit,) = _audit_events(cap_logs)
+        assert audit["outcome"] == "denied"
+
+    async def test_allowlisted_voms_is_accepted(
+        self,
+        make_client: Callable[[Settings], httpx.AsyncClient],
+        make_token: Callable[..., str],
+        settings: Settings,
+    ) -> None:
+        settings_with_cms = Settings(
+            _env_file=None,
+            broker_jwks_url=settings.broker_jwks_url,
+            broker_issuer=settings.broker_issuer,
+            home_root=settings.home_root,
+            voms_proxy_info_bin=settings.voms_proxy_info_bin,
+            allowed_voms=["atlas", "cms"],
+        )
+        async with make_client(settings_with_cms) as authed_client:
+            resp = await authed_client.post(
+                "/v1/mint",
+                headers=_auth(make_token()),
+                json=_body(voms="cms"),
+            )
+        assert resp.status_code == 200
