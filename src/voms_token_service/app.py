@@ -27,6 +27,7 @@ from voms_token_service.identity import get_jwks, peek_sub, verify_broker_token
 from voms_token_service.logging import configure_logging
 from voms_token_service.minting import (
     BadPassphraseError,
+    CertificateExpiredError,
     CredentialPermissionsError,
     MintingError,
     mint_proxy,
@@ -219,6 +220,25 @@ async def mint(
         # neither counts it against the passphrase rate limiter (400) nor
         # tells the user to "retry later" (502). The message is a fixed
         # string from minting.py, never voms-proxy-init's stderr.
+        _audit(
+            subject=subject,
+            unixname=body.unixname,
+            dn_sha256=None,
+            jti=jti,
+            outcome="denied",
+            request_id=request_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from None
+    except CertificateExpiredError as exc:
+        # User-actionable (get a new grid certificate) — 422 for the same
+        # reason as CredentialPermissionsError above: not a passphrase issue
+        # (no rate-limiter hit), not an infra failure (no "retry later"),
+        # and retrying cannot help until the user acts. The message is a
+        # fixed string from minting.py, never voms-proxy-init's stderr
+        # (which includes the certificate's exact expiry timestamp).
         _audit(
             subject=subject,
             unixname=body.unixname,
