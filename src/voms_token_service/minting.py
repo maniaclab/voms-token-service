@@ -180,10 +180,12 @@ async def mint_proxy(
         voms-proxy-init --rfc --voms <voms> --valid <valid> \\
             --cert <usercert> --key <userkey> --out <tmpfile> --pwstdin
 
-    writing the proxy to $HOME/x509_u$UID in the user's own home, feeding
-    *passphrase* on stdin. Takes ownership of
-    *passphrase* and zeros it (and the stdin buffer built from it) before
-    returning, on every path — success, bad passphrase, or infra failure.
+    writing the proxy to a per-user pod-tmpfs staging file
+    ({proxy_tmp_root}/{unixname}/x509_u{uid}), feeding *passphrase* on
+    stdin, then reading it back and deleting the staging file (see
+    _read_proxy_as_user). Takes ownership of *passphrase* and zeros it (and
+    the stdin buffer built from it) before returning, on every path —
+    success, bad passphrase, or infra failure.
 
     The subprocess call is synchronous (``subprocess.run``, offloaded to a
     thread via ``run_in_executor``) rather than ``asyncio.create_subprocess_exec``
@@ -360,9 +362,9 @@ async def mint_proxy(
             run_extra_groups=run_extra_groups,
         )
     finally:
-        # The proxy file deliberately persists in the user's home (their
-        # own 0600 session proxy, per the login-node convention); there is
-        # no pod-side temp state to clean up.
+        # Nothing to do here: out_path lives in the pod tmpfs staging dir
+        # and gets deleted by _read_proxy_as_user itself, as part of the
+        # read-back, rather than by this finally block.
         pass
 
     dn, voms_attributes, expires_at = _parse_proxy_pem(proxy_pem)
