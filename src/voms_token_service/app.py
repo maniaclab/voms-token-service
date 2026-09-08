@@ -32,6 +32,13 @@ from voms_token_service.minting import (
     MintingError,
     mint_proxy,
 )
+from voms_token_service.policy import (
+    InvalidValidError,
+    ValidTooLongError,
+    VomsNotAllowedError,
+    check_valid,
+    check_voms,
+)
 from voms_token_service.preflight import (
     InvalidUnixnameError,
     PreflightResult,
@@ -186,6 +193,28 @@ async def mint(
 
     voms = body.voms or settings.default_voms
     valid = body.valid or settings.default_valid
+
+    # Policy limits (maniaclab/voms-token-service#10): the broker only
+    # proves who the caller is, not that they should be allowed to mint a
+    # month-long proxy or a proxy for an arbitrary VO — enforced here,
+    # before the passphrase is ever touched, same as validate_unixname
+    # above.
+    try:
+        check_voms(voms, allowed_voms=settings.allowed_voms)
+        check_valid(valid, max_valid=settings.max_valid)
+    except (VomsNotAllowedError, InvalidValidError, ValidTooLongError) as exc:
+        _audit(
+            subject=subject,
+            unixname=body.unixname,
+            dn_sha256=None,
+            jti=jti,
+            outcome="denied",
+            request_id=request_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from None
 
     # Copy the passphrase into a mutable buffer at the earliest point
     # possible; mint_proxy takes ownership of it and zeros it (success or

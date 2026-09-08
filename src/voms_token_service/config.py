@@ -65,6 +65,15 @@ class Settings(BaseSettings):
     default_voms: str = "atlas"
     default_valid: str = "192:00"
 
+    # Policy limits on caller-supplied `voms`/`valid` (maniaclab/voms-token-
+    # service#10): a compromised or confused caller must not be able to
+    # mint month-long proxies or proxies for arbitrary VOs just because the
+    # broker authenticated them. Enforced in app.py via policy.py; both
+    # default to the current default_valid/default_voms so upgrading this
+    # service tightens nothing an operator hasn't already opted into.
+    max_valid: str = "192:00"
+    allowed_voms: list[str] = Field(default_factory=lambda: ["atlas"])
+
     # Wall-clock bound on the voms-proxy-init subprocess. A VOMS server that
     # never responds (or a hung network call) must not hang the request
     # forever; a timeout is treated as an infra failure (502), not a bad

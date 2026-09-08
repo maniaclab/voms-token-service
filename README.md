@@ -91,15 +91,26 @@ code path gets this wrong).
 
 | Endpoint | Auth | Behavior |
 | --- | --- | --- |
-| `POST /v1/mint` | `Authorization: Bearer <AF Broker Identity Token>` | Body `{"unixname": str, "uid": int, "gid": int, "passphrase": str, "voms": "atlas", "valid": "192:00"}` (`voms`/`valid` optional). Mints a VOMS proxy via `voms-proxy-init` against `{HOME_ROOT}/{unixname}/.globus/{usercert,userkey}.pem`. Returns `{"pem", "dn", "voms_attributes", "expires_at", "nickname"}` (`nickname` is a best-effort VOMS-attribute lookup — see below — and is `None` when extraction fails). 400 `{"detail": "bad passphrase"}` when the key's passphrase was wrong (detected from voms-proxy-init's openssl "bad decrypt" stderr); 401 invalid/missing token; 502 on any other minting failure (generic detail — stderr is logged server-side only, never returned). |
+| `POST /v1/mint` | `Authorization: Bearer <AF Broker Identity Token>` | Body `{"unixname": str, "uid": int, "gid": int, "passphrase": str, "voms": "atlas", "valid": "192:00"}` (`voms`/`valid` optional). Mints a VOMS proxy via `voms-proxy-init` against `{HOME_ROOT}/{unixname}/.globus/{usercert,userkey}.pem`. Returns `{"pem", "dn", "voms_attributes", "expires_at", "nickname"}` (`nickname` is a best-effort VOMS-attribute lookup — see below — and is `None` when extraction fails). 400 `{"detail": "bad passphrase"}` when the key's passphrase was wrong (detected from voms-proxy-init's openssl "bad decrypt" stderr); 401 invalid/missing token; 422 when `voms`/`valid` violate policy (see below), the unixname is unsafe, the user's key permissions are wrong, or the user's certificate has expired; 502 on any other minting failure (generic detail — stderr is logged server-side only, never returned). |
 | `GET /v1/preflight/{unixname}` | `Authorization: Bearer <AF Broker Identity Token>` (same as `/v1/mint`) | Credential-readiness checklist for the AF portal's "Grid Certificates" checklist — see below. |
 | `GET /healthz` | none | Always 200. |
 | `GET /readyz` | none | 200 only when `voms-proxy-init` is executable and the broker JWKS is fetchable; 503 otherwise. |
 
 Configuration is env-driven (`src/voms_token_service/config.py`):
 `BROKER_JWKS_URL`, `BROKER_ISSUER`, `EXPECTED_AUDIENCE`, `HOME_ROOT`,
-`VOMS_PROXY_INIT_BIN`, `DEFAULT_VOMS`, `DEFAULT_VALID`,
-`PROXY_INIT_TIMEOUT_SECONDS`, `JWKS_CACHE_TTL_SECONDS`, `LOG_LEVEL`.
+`VOMS_PROXY_INIT_BIN`, `DEFAULT_VOMS`, `DEFAULT_VALID`, `MAX_VALID`,
+`ALLOWED_VOMS`, `PROXY_INIT_TIMEOUT_SECONDS`, `JWKS_CACHE_TTL_SECONDS`,
+`LOG_LEVEL`.
+
+**Mint policy: `MAX_VALID` / `ALLOWED_VOMS`.** The broker's identity token
+only proves *who* the caller is, not that they should be allowed to mint a
+month-long proxy or a proxy for an arbitrary VO — so `POST /v1/mint`
+rejects (422, before the passphrase is ever touched — see
+`policy.py`/`app.py`) a `valid` that exceeds `MAX_VALID` or a `voms` not in
+`ALLOWED_VOMS` (a JSON array, e.g. `["atlas", "cms"]`). Both default to the
+current `DEFAULT_VALID`/`DEFAULT_VOMS` (`192:00` / `["atlas"]`), so
+upgrading this service tightens nothing an operator hasn't already opted
+into raising via the chart's `config.maxValid`/`config.allowedVoms`.
 
 **No rate limiter here, unlike condor-token-service.** condor-token-service
 guards a symmetric pool-password key that could mint tokens for any identity

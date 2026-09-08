@@ -124,6 +124,10 @@ spec:
               value: {{ .Values.config.defaultVoms | quote }}
             - name: DEFAULT_VALID
               value: {{ .Values.config.defaultValid | quote }}
+            - name: MAX_VALID
+              value: {{ .Values.config.maxValid | quote }}
+            - name: ALLOWED_VOMS
+              value: {{ .Values.config.allowedVoms | toJson | quote }}
             - name: PROXY_INIT_TIMEOUT_SECONDS
               value: {{ .Values.config.proxyInitTimeoutSeconds | quote }}
             - name: LOG_LEVEL

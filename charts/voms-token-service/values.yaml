@@ -58,6 +58,13 @@ config:
   # Defaults applied when a mint request omits voms/valid.
   defaultVoms: "atlas"
   defaultValid: "192:00"
+  # Policy limits on caller-supplied voms/valid (see
+  # src/voms_token_service/policy.py): a request above maxValid or for a
+  # voms not in allowedVoms is rejected (422) rather than minted. Both
+  # default to the values above, so upgrading this chart tightens nothing
+  # an operator hasn't already opted into raising.
+  maxValid: "192:00"
+  allowedVoms: ["atlas"]
   # Wall-clock bound on the voms-proxy-init subprocess (seconds).
   proxyInitTimeoutSeconds: 60
   logLevel: "INFO"
