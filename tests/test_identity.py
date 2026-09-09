@@ -89,6 +89,27 @@ class TestVerifyBrokerToken:
             await identity.verify_broker_token("not-a-jwt", settings)
         assert excinfo.value.status_code == 401
 
+    async def test_malformed_jwks_entry_is_401(
+        self,
+        make_token: Callable[..., str],
+        settings: Settings,
+        stub_jwks_fetch: JwksFetchStub,
+    ) -> None:
+        # A JWKS entry missing the RSA n/e fields makes
+        # jwt.algorithms.RSAAlgorithm.from_jwk raise jwt.InvalidKeyError,
+        # which is not a jwt.InvalidTokenError subclass — regression test for
+        # that escaping verify_broker_token uncaught as an unhandled 500
+        # instead of an audited 401.
+        malformed_entry = {"kid": "malformed-key", "kty": "RSA", "use": "sig"}
+        # `jwks` (and thus stub_jwks_fetch.keys) is session-scoped; reassign
+        # rather than append in place, or the malformed entry leaks into
+        # every other test in the session.
+        stub_jwks_fetch.keys = [*stub_jwks_fetch.keys, malformed_entry]
+        token = make_token(kid="malformed-key")
+        with pytest.raises(HTTPException) as excinfo:
+            await identity.verify_broker_token(token, settings)
+        assert excinfo.value.status_code == 401
+
     async def test_no_kid_falls_back_to_single_jwks_key(
         self, make_token: Callable[..., str], settings: Settings
     ) -> None:
