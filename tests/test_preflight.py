@@ -163,6 +163,29 @@ class TestRunPreflightLooseKeyMode:
         key_check = next(c for c in result.checks if c.name == "userkey")
         assert key_check.ok is True
 
+    def test_owner_only_key_mode_outside_required_set_is_flagged(
+        self, settings: Settings
+    ) -> None:
+        # voms-clients (canl) accepts exactly 0400 or 0600, so an owner-only
+        # 0700 key still fails there even though the C client would take it.
+        _write_pair(settings, "gstark", userkey_mode=0o700)
+        result = run_preflight(settings, "gstark")
+        key_check = next(c for c in result.checks if c.name == "userkey")
+        assert key_check.ok is False
+        assert key_check.detail is not None
+        assert "must be 0400 or 0600" in key_check.detail
+
+    def test_loose_key_detail_names_found_and_required_modes(
+        self, settings: Settings
+    ) -> None:
+        _write_pair(settings, "gstark", userkey_mode=0o644)
+        result = run_preflight(settings, "gstark")
+        key_check = next(c for c in result.checks if c.name == "userkey")
+        assert key_check.detail == (
+            "userkey.pem is 0644 but must be 0400 or 0600 (readable only by "
+            "you). Fix: chmod 400 ~/.globus/userkey.pem"
+        )
+
     def test_usercert_loose_mode_is_still_ok(self, settings: Settings) -> None:
         # "Any mode is acceptable for the cert."
         _write_pair(settings, "gstark", usercert_mode=0o644)
@@ -226,3 +249,22 @@ class TestRunPreflightNotARegularFile:
         cert_check = next(c for c in result.checks if c.name == "usercert")
         assert cert_check.exists is True
         assert cert_check.ok is False
+
+
+class TestRunPreflightRequiredModes:
+    def test_userkey_reports_required_modes_and_others_do_not(
+        self, settings: Settings
+    ) -> None:
+        _write_pair(settings, "gstark")
+        by_name = {c.name: c for c in run_preflight(settings, "gstark").checks}
+        assert by_name["userkey"].required_modes == ["0400", "0600"]
+        # The certificate is public; any mode the owner can read works.
+        assert by_name["usercert"].required_modes is None
+        assert by_name["globus_dir"].required_modes is None
+
+    def test_required_modes_reported_when_files_are_missing(
+        self, settings: Settings
+    ) -> None:
+        by_name = {c.name: c for c in run_preflight(settings, "nouser").checks}
+        assert by_name["userkey"].required_modes == ["0400", "0600"]
+        assert by_name["usercert"].required_modes is None

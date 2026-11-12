@@ -171,7 +171,7 @@ downstream services (e.g. rucio-mcp) that need that mapping.
 
 Minting fails in ways a user can't self-diagnose from the broker's side:
 their `~/.globus` directory doesn't exist yet, the cert/key pair hasn't
-been copied over, or `userkey.pem` is left group/other-readable (which
+been copied over, or `userkey.pem` is not mode 0400 or 0600 (which
 `voms-proxy-init` itself refuses to use). This endpoint answers "is this
 user's Globus credential in a state where minting could possibly work?"
 without ever performing a mint — intended to sit behind a broker proxy
@@ -206,7 +206,7 @@ Authorization: Bearer <AF Broker Identity Token>
   "checks": [
     {"name": "globus_dir", "path": "/home/kratsg/.globus", "exists": true, "ok": true, "detail": null},
     {"name": "usercert", "path": "/home/kratsg/.globus/usercert.pem", "exists": true, "mode": "0444", "readable_by_service": true, "ok": true, "detail": null},
-    {"name": "userkey", "path": "/home/kratsg/.globus/userkey.pem", "exists": true, "mode": "0644", "readable_by_service": true, "ok": false, "detail": "userkey.pem must not be group/other-accessible (found 0644); run: chmod 400 ~/.globus/userkey.pem"}
+    {"name": "userkey", "path": "/home/kratsg/.globus/userkey.pem", "exists": true, "mode": "0644", "readable_by_service": true, "ok": false, "detail": "userkey.pem is 0644 but must be 0400 or 0600 (readable only by you). Fix: chmod 400 ~/.globus/userkey.pem", "required_modes": ["0400", "0600"]}
   ]
 }
 ```
@@ -214,12 +214,18 @@ Authorization: Bearer <AF Broker Identity Token>
 `mode`/`readable_by_service` are omitted (not `null`) on the `globus_dir`
 check — they don't apply to a directory — via
 `response_model_exclude_none=True`; they're always present for the
-`usercert`/`userkey` checks once the file exists.
+`usercert`/`userkey` checks once the file exists. `required_modes` lists
+the exact modes a file must have, as octal strings; it is present only for
+`userkey` (whether or not the file exists), so a client can show the
+requirement before the user gets it wrong.
 
 **Why `userkey.pem` enforces a mode and `usercert.pem` doesn't.** The
 private key's passphrase is the one secret this service is trusted with;
-`voms-proxy-init` itself already refuses a group/other-readable key, so
-flagging it here (rather than letting the user discover it via an opaque
+`voms-proxy-init` itself refuses a key that isn't owner-only — the C client
+rejects any group/other read/write bit, and the Java `voms-clients` (canl)
+accepts exactly "Required permissions are: 400, 600" — so the key must be
+exactly 0400 or 0600, the set both clients accept. Flagging it here
+(rather than letting the user discover it via an opaque
 mint failure) is the entire point of a *preflight* check. The certificate
 is public by design — X.509 certs are meant to be handed out — so any mode
 is accepted for `usercert.pem`.
@@ -251,8 +257,8 @@ The Helm chart at `charts/voms-token-service/` encodes the privilege model:
   affinity requirement by default: any node that can mount the PVC can run
   it.
 - **Privilege model: `runAsUser: 0` + `CAP_DAC_READ_SEARCH`, not plain
-  root.** `~<user>/.globus/{usercert,userkey}.pem` are typically mode 0600,
-  owned by that user — not root, and not group-readable by anything this
+  root.** `~<user>/.globus/userkey.pem` is mode 0400 or 0600 (and
+  `usercert.pem` is often 0644 or 0444), owned by that user — not root, and not group-readable by anything this
   pod could plausibly hold. Running as `runAsUser: 0` with `capabilities:
   {drop: [ALL]}` (condor-token-service's own approach, for the pool
   password it owns as root) would **not** be enough here: dropping every
@@ -265,8 +271,8 @@ The Helm chart at `charts/voms-token-service/` encodes the privilege model:
   **child runs as the requesting user** (grid sslutils requires the key be
   *owned* by the process's effective uid, so a root-run child rejects every
   user's key with "key must only be readable by the user"; impersonation
-  also makes NFS homes access carry the real uid). A key with group/other
-  permission bits is rejected with an actionable 422 (fix: `chmod 400`),
+  also makes NFS homes access carry the real uid). A key whose mode is not
+  0400 or 0600 is rejected with an actionable 422 (fix: `chmod 400`),
   distinct from both bad-passphrase (400, rate-limited by the broker) and
   infra failures (502, retryable). Everything else stays locked down: read-only root filesystem
   (voms-proxy-init's private tmpdir is a `Memory`-backed `emptyDir` at

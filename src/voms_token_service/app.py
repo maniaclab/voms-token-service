@@ -82,6 +82,7 @@ class PreflightCheck(BaseModel):
     mode: str | None = None
     readable_by_service: bool | None = None
     detail: str | None = None
+    required_modes: list[str] | None = None
 
 
 class PreflightResponse(BaseModel):

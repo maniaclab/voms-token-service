@@ -31,6 +31,12 @@ if TYPE_CHECKING:
 # rather than treating %2F as a literal separator).
 _UNIXNAME_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 
+# The private key must be exactly one of these modes. The C voms-proxy-init
+# only rejects group/other read/write bits, but voms-clients (canl) insists
+# on "Required permissions are: 400, 600" — so the union of both clients'
+# rules is this exact set. The certificate is public and has no requirement.
+USERKEY_REQUIRED_MODES: tuple[int, ...] = (0o400, 0o600)
+
 
 class InvalidUnixnameError(ValueError):
     """Raised by validate_unixname when *unixname* is not a safe path segment."""
@@ -59,6 +65,8 @@ class CredentialCheck:
     mode: str | None = None
     readable_by_service: bool | None = None
     detail: str | None = None
+    # Octal strings (e.g. "0400"); None means the file has no mode requirement.
+    required_modes: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -96,12 +104,28 @@ def _missing_dir_detail(settings: Settings, unixname: str) -> str:
     )
 
 
+def _required_modes_octal(required_modes: tuple[int, ...] | None) -> list[str] | None:
+    if required_modes is None:
+        return None
+    return [_mode_octal(m) for m in required_modes]
+
+
 def _check_cert_file(
-    *, name: str, path: Path, enforce_private_mode: bool, missing_detail: str
+    *,
+    name: str,
+    path: Path,
+    required_modes: tuple[int, ...] | None,
+    missing_detail: str,
 ) -> CredentialCheck:
+    required = _required_modes_octal(required_modes)
     if not path.exists():
         return CredentialCheck(
-            name=name, path=str(path), exists=False, ok=False, detail=missing_detail
+            name=name,
+            path=str(path),
+            exists=False,
+            ok=False,
+            detail=missing_detail,
+            required_modes=required,
         )
     if not path.is_file():
         return CredentialCheck(
@@ -110,6 +134,7 @@ def _check_cert_file(
             exists=True,
             ok=False,
             detail=f"{path.name} exists but is not a regular file",
+            required_modes=required,
         )
 
     mode_int = stat.S_IMODE(path.stat().st_mode)
@@ -125,9 +150,10 @@ def _check_cert_file(
             readable_by_service=False,
             ok=False,
             detail=f"service cannot read {path.name}: {read_detail}",
+            required_modes=required,
         )
 
-    if enforce_private_mode and mode_int & 0o077:
+    if required_modes is not None and mode_int not in required_modes:
         return CredentialCheck(
             name=name,
             path=str(path),
@@ -136,9 +162,10 @@ def _check_cert_file(
             readable_by_service=True,
             ok=False,
             detail=(
-                f"{path.name} must not be group/other-accessible (found {mode}); "
-                f"run: chmod 400 ~/.globus/{path.name}"
+                f"{path.name} is {mode} but must be {' or '.join(_mode_octal(m) for m in required_modes)} "
+                f"(readable only by you). Fix: chmod 400 ~/.globus/{path.name}"
             ),
+            required_modes=required,
         )
 
     return CredentialCheck(
@@ -148,6 +175,7 @@ def _check_cert_file(
         mode=mode,
         readable_by_service=True,
         ok=True,
+        required_modes=required,
     )
 
 
@@ -190,6 +218,7 @@ def run_preflight(settings: Settings, unixname: str) -> PreflightResult:
                 exists=False,
                 ok=False,
                 detail=missing_detail,
+                required_modes=_required_modes_octal(USERKEY_REQUIRED_MODES),
             )
         )
     else:
@@ -197,7 +226,7 @@ def run_preflight(settings: Settings, unixname: str) -> PreflightResult:
             _check_cert_file(
                 name="usercert",
                 path=usercert_path(settings, unixname),
-                enforce_private_mode=False,
+                required_modes=None,
                 missing_detail="usercert.pem not found",
             )
         )
@@ -205,7 +234,7 @@ def run_preflight(settings: Settings, unixname: str) -> PreflightResult:
             _check_cert_file(
                 name="userkey",
                 path=userkey_path(settings, unixname),
-                enforce_private_mode=True,
+                required_modes=USERKEY_REQUIRED_MODES,
                 missing_detail="userkey.pem not found",
             )
         )
