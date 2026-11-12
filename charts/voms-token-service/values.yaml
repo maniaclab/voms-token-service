@@ -82,9 +82,9 @@ homes:
   existingClaim: "af-homes"
   mountPath: "/home"
 
-# Pod-level security context. Reading arbitrary users' ~/.globus/*.pem
-# (mode 0600, owned by that user — not root, and not group-readable by any
-# group this pod could plausibly hold) requires runAsUser 0 *and*
+# Pod-level security context. Reading arbitrary users' ~/.globus/userkey.pem
+# (mode 0400 or 0600, owned by that user — not root, and not group-readable
+# by any group this pod could plausibly hold) requires runAsUser 0 *and*
 # CAP_DAC_READ_SEARCH (see containerSecurityContext below) — root alone does
 # not bypass file permission checks once ALL capabilities are dropped.
 # CAP_DAC_READ_SEARCH is the minimal capability for this: it grants read

@@ -99,6 +99,8 @@ class TestHappyPath:
         assert by_name["userkey"]["ok"] is True
         assert by_name["userkey"]["mode"] == "0400"
         assert by_name["userkey"]["readable_by_service"] is True
+        assert by_name["userkey"]["required_modes"] == ["0400", "0600"]
+        assert "required_modes" not in by_name["usercert"]
 
 
 @pytest.mark.usefixtures("stub_jwks_fetch")
